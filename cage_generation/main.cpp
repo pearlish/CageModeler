@@ -726,26 +726,35 @@ std::array<ExactPoint, 8> compute_voxel_vertices(
 }
 
 void add_voxel_faces(
-    Exact_Polyhedron& mesh,
-    const std::array<ExactPoint, 8>& vertices,
-    const std::array<bool, 6>& exposed_faces)
+	ExactMesh& mesh,
+	const std::array<ExactMesh::Vertex_index, 8>& mesh_vertices,
+	const std::array<bool, 6>& exposed_faces)
 {
-  static const std::array<std::array<int, 4>, 6> faces = {{
-        {{0, 3, 6, 2}},  // -X
-        {{1, 4, 7, 5}},  // +X
-        {{1, 5, 3, 0}},  // -Y
-        {{2, 6, 7, 4}},  // +Y
-        {{1, 0, 2, 4}},  // -Z
-        {{3, 5, 7, 6}}   // +Z
-    }};
+	static const std::array<std::array<int, 4>, 6> faces = { {
+		{{0, 3, 6, 2}},  // -X
+		{{1, 4, 7, 5}},  // +X
+		{{1, 5, 3, 0}},  // -Y
+		{{2, 6, 7, 4}},  // +Y
+		{{1, 0, 2, 4}},  // -Z
+		{{3, 5, 7, 6}}   // +Z
+	} };
 
-    for (int i = 0; i < 6; ++i) {
-        if (exposed_faces[i]) {
-            mesh.make_triangle(vertices[faces[i][0]], vertices[faces[i][1]], vertices[faces[i][2]]);
-            mesh.make_triangle(vertices[faces[i][2]], vertices[faces[i][3]], vertices[faces[i][0]]);
-        }
-    }
+	for (int i = 0; i < 6; ++i) {
+		if (exposed_faces[i]) {
+			mesh.add_face(mesh_vertices[faces[i][0]], mesh_vertices[faces[i][1]], mesh_vertices[faces[i][2]]);
+			mesh.add_face(mesh_vertices[faces[i][2]], mesh_vertices[faces[i][3]], mesh_vertices[faces[i][0]]);
+		}
+	}
 }
+
+struct PointHash {
+	std::size_t operator()(const ExactPoint& p) const {
+		auto h1 = std::hash<double>{}(CGAL::to_double(p.x()));
+		auto h2 = std::hash<double>{}(CGAL::to_double(p.y()));
+		auto h3 = std::hash<double>{}(CGAL::to_double(p.z()));
+		return h1 ^ (h2 << 1) ^ (h3 << 2);
+	}
+};
 
 /// @brief generate trianglular surface from voxelized model
 /// @param grid the position of every voxel
@@ -758,30 +767,44 @@ void extract_surface_from_voxels(
     const ExactPoint& origin,
     const std::string outputfile)
 {
-	Exact_Polyhedron output_mesh;
-    size_t nx = grid.size(), ny = grid[0].size(), nz = grid[0][0].size();
-    for (size_t x = 0; x < nx; ++x) {
-        for (size_t y = 0; y < ny; ++y) {
-            for (size_t z = 0; z < nz; ++z) {
-                if (!grid[x][y][z]) continue;  
+	ExactMesh output_mesh;
+	size_t nx = grid.size(), ny = grid[0].size(), nz = grid[0][0].size();
+    
+	std::unordered_map<ExactPoint, ExactMesh::Vertex_index, PointHash> vertex_map;
+	for (size_t x = 0; x < nx; ++x) {
+       	    for (size_t y = 0; y < ny; ++y) {
+            	for (size_t z = 0; z < nz; ++z) {
+                    if (!grid[x][y][z]) continue;  
 
-                std::array<ExactPoint, 8> voxel_vertices =
-                    compute_voxel_vertices(origin + x * voxel_strides[0] + y * voxel_strides[1] + z * voxel_strides[2], voxel_strides);
+		    std::array<ExactPoint, 8> voxel_vertices = 
+		    compute_voxel_vertices(origin + x * voxel_strides[0] + y * voxel_strides[1] + z * voxel_strides[2], voxel_strides);
 
-                std::array<bool, 6> exposed_faces = {true, true, true, true, true, true};
-                for (int i = 0; i < 6; ++i) {
-                    int nx = x + neighbors[i][0];
-                    int ny = y + neighbors[i][1];
-                    int nz = z + neighbors[i][2];
-                    if (nx >= 0 && nx < grid.size() &&
-                        ny >= 0 && ny < grid[0].size() &&
-                        nz >= 0 && nz < grid[0][0].size() &&
-                        grid[nx][ny][nz]) {
-                        exposed_faces[i] = false;
-                    }
-                }
+		    std::array<ExactMesh::Vertex_index, 8> mesh_vertices;
+		    for (int i = 0; i < 8; ++i) {
+			auto it = vertex_map.find(voxel_vertices[i]);
+			if (it == vertex_map.end()) {
+				ExactMesh::Vertex_index v = output_mesh.add_vertex(voxel_vertices[i]);
+				mesh_vertices[i] = v;
+				vertex_map[voxel_vertices[i]] = v;
+			}
+			else {
+				mesh_vertices[i] = it->second;
+			}
+		    }
+                    std::array<bool, 6> exposed_faces = {true, true, true, true, true, true};
+                    for (int i = 0; i < 6; ++i) {
+			int nx = x + neighbors[i][0];
+                    	int ny = y + neighbors[i][1];
+                    	int nz = z + neighbors[i][2];
+                    	if (nx >= 0 && nx < grid.size() && 
+				ny >= 0 && ny < grid[0].size() &&
+                        	nz >= 0 && nz < grid[0][0].size() &&
+                        	grid[nx][ny][nz]) {
+                        	exposed_faces[i] = false;
+                    	}
+		    }
 
-                add_voxel_faces(output_mesh, voxel_vertices, exposed_faces);
+		    add_voxel_faces(output_mesh, mesh_vertices, exposed_faces);
             }
         }
     }
@@ -809,7 +832,6 @@ std::ofstream output(outputfile);
    output.close();
 
    std::cout<<"meshing is done successfully!"<<std::endl;
-
 
 }
 
