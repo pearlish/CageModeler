@@ -8,10 +8,11 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
-#include <bitset>
+#include <chrono>
 #include <omp.h>
 #include <ctime>
 #define CGAL_EIGEN3_ENABLED
+//#define DETERMINE_VOXEL_SIZE
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -43,8 +44,45 @@
 #include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Bounded_normal_change_placement.h>
 #include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Constrained_placement.h>
 #include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_count_stop_predicate.h>
-#include <boost/optional/optional_io.hpp>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
+#include <CGAL/Polygon_mesh_processing/repair.h>
+#include <CGAL/Convex_hull_3.h>
+#include <CGAL/boost/graph/Euler_operations.h>
 
+// save diagnostic state
+#pragma GCC diagnostic push 
+
+// turn off the specific warning. Can also use "-Wall"
+#pragma GCC diagnostic ignored "-Wunused-local-typedefs"
+#pragma GCC diagnostic ignored "-Wreturn-type"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wmissing-template-arg-list-after-template-kw"
+
+
+// stuff to define the mesh
+#include <vcg/complex/complex.h>
+
+//io
+#include <wrap/io_trimesh/import_obj.h>
+#include <wrap/io_trimesh/import_off.h>
+#include <wrap/io_trimesh/export.h>
+
+
+// local optimization
+#include <vcg/complex/algorithms/local_optimization.h>
+#include <vcg/complex/algorithms/local_optimization/tri_edge_collapse_quadric.h>
+#include <vcg/complex/algorithms/clean.h>
+#include <vcg/complex/algorithms/smooth.h>
+//#include <vcg/export_off.h> 
+
+
+
+
+#include <boost/optional/optional_io.hpp>
+using namespace vcg;
+using namespace tri;
+namespace PMP = CGAL::Polygon_mesh_processing;
+namespace SMS = CGAL::Surface_mesh_simplification;
 
 typedef CGAL::Exact_predicates_exact_constructions_kernel			Exact_Kernel;
 typedef CGAL::Exact_predicates_inexact_constructions_kernel			Inexact_Kernel;
@@ -57,54 +95,40 @@ typedef Inexact_Kernel::Triangle_3									Triangle;
 typedef Exact_Kernel::Vector_3										ExactVector;
 typedef CGAL::Surface_mesh<InexactPoint>							Mesh;
 typedef CGAL::Surface_mesh<ExactPoint>								ExactMesh;
+
 typedef CGAL::AABB_face_graph_triangle_primitive<Exact_Polyhedron>	Primitive;
 typedef CGAL::AABB_traits<Exact_Kernel, Primitive>					Traits;
 typedef CGAL::AABB_tree<Traits>										Tree;
 typedef CGAL::Side_of_triangle_mesh<Exact_Polyhedron, Exact_Kernel>	Point_inside;
+typedef SMS::Polyhedral_envelope_filter<Inexact_Kernel,
+	SMS::Bounded_normal_change_filter<>>							Filter;
 
 typedef boost::graph_traits<Inexact_Polyhedron>::edge_descriptor      edge_descriptor;
 typedef boost::graph_traits<Inexact_Polyhedron>                             GraphTraits;
 typedef typename GraphTraits::halfedge_descriptor                           halfedge_descriptor;
 typedef typename GraphTraits::vertex_descriptor                             vertex_descriptor;
-typedef Exact_Polyhedron::Vertex_handle Vertex;
-typedef Exact_Polyhedron::Face_handle Face;
-typedef std::vector<bool> VOXEL_GRID;
-typedef std::vector<VOXEL_GRID>	MIPMAP_TYPE;
 
-namespace PMP = CGAL::Polygon_mesh_processing;
-namespace SMS = CGAL::Surface_mesh_simplification;
-
-
-// save diagnostic state
-#pragma GCC diagnostic push 
-
-// turn off the specific warning. Can also use "-Wall"
-#pragma GCC diagnostic ignored "-Wunused-local-typedefs"
-#pragma GCC diagnostic ignored "-Wreturn-type"
-#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#pragma GCC diagnostic ignored "-Wmissing-template-arg-list-after-template-kw"
+typedef CGAL::Simple_cartesian<double>                                  Kernel;
+typedef CGAL::Polyhedron_3<Kernel>                                      Surface_mesh;
+typedef Kernel::Point_3                                                 Surface_Point;
+typedef Kernel::Vector_3                                                 Surface_Vector;
+typedef CGAL::Surface_mesh<Surface_Point>                                SurMesh;
+typedef boost::graph_traits<SurMesh>::face_descriptor                    FaceIndex;
+typedef boost::graph_traits<SurMesh>::halfedge_descriptor                HalfedgeIndex;
+typedef boost::graph_traits<SurMesh>::vertex_descriptor                  VertexIndex;
 
 
-// for decimation
+typedef SMS::GarlandHeckbert_plane_policies<Surface_mesh,Kernel>         QEM_Policies;
+typedef Surface_mesh::Halfedge_handle                             HalfedgeHandle;
+typedef Surface_mesh::Edge_iterator                                EdgeIterator;
+typedef CGAL::Side_of_triangle_mesh<Surface_mesh, Kernel>          Point_inside_simp;
+typedef boost::graph_traits<Surface_mesh>::edge_descriptor        sedge_descriptor;
+typedef boost::graph_traits<Surface_mesh>::halfedge_descriptor    shalfedge_descriptor;
 
-// stuff to define the mesh
-#include <vcg/complex/complex.h>
 
-// io
-#include <wrap/io_trimesh/import_obj.h>
-#include <wrap/io_trimesh/import_off.h>
-#include <wrap/io_trimesh/export.h>
+using Grid3D=std::vector<std::vector<std::vector<bool>>>; //represent the voxelized grid
+using MipmapTree=std::vector<std::map<std::array<int,3>,bool>>;  //used to save the hierarchy
 
-// local optimization
-#include <vcg/complex/algorithms/local_optimization.h>
-#include <vcg/complex/algorithms/local_optimization/tri_edge_collapse_quadric.h>
-#include <vcg/complex/algorithms/clean.h>
-#include <vcg/complex/algorithms/smooth.h>
-
-//#include <vcg/export_off.h> 
-
-using namespace vcg;
-using namespace tri;
 
 class MyVertex;
 class MyEdge;
@@ -152,30 +176,21 @@ public:
 	inline MyTriEdgeCollapse(const VertexPair& p, int i, BaseParameterClass* pp) :TECQ(p, i, pp) {}
 };
 
-#define BASE_RESOLUTION 32
-
-typedef struct {
-	int level;
-	unsigned int pos;
-} Node;
 
 
-unsigned int coords_to_voxel_idx(unsigned int x_idx, unsigned int y_idx, unsigned int z_idx, std::array<unsigned int, 3> numVoxels)
-{
-	return z_idx + y_idx * numVoxels[2] + x_idx * numVoxels[2] * numVoxels[1];
+
+Grid3D initializeGrid(int x, int y, int z){  //initialize the grid with given dimensions in x,y,z drtections
+
+    return Grid3D(x,std::vector<std::vector<bool>>(y,std::vector<bool>(z,false)));
 }
 
-unsigned int coords_to_voxel_idx(unsigned int x_idx, unsigned int y_idx, unsigned int z_idx, int numVoxels)
-{
-	return z_idx + y_idx * numVoxels + x_idx * numVoxels * numVoxels;
-}
 
-void convert_voxel_idx_to_coords(unsigned int idx, unsigned int numVoxels, unsigned int& x_idx, unsigned int& y_idx, unsigned int& z_idx)
+void convert_voxel_idx_to_coords(unsigned int idx, std::array<unsigned int, 3> numVoxels, unsigned int& x_idx, unsigned int& y_idx, unsigned int& z_idx)
 {
-	x_idx = idx / (numVoxels * numVoxels);
-	auto const w = idx % (numVoxels * numVoxels);
-	y_idx = w / numVoxels;
-	z_idx = w % numVoxels;
+	x_idx = idx / (numVoxels[1] * numVoxels[2]);
+	auto const w = idx % (numVoxels[1] * numVoxels[2]);
+	y_idx = w / numVoxels[2];
+	z_idx = w % numVoxels[2];
 }
 
 std::array<ExactPoint, 8> calc_voxel_points(unsigned int idx, std::array<unsigned int, 3> numVoxels, ExactPoint min_point,
@@ -183,7 +198,7 @@ std::array<ExactPoint, 8> calc_voxel_points(unsigned int idx, std::array<unsigne
 {
 	unsigned int x_idx, y_idx, z_idx;
 
-	convert_voxel_idx_to_coords(idx, numVoxels[0], x_idx, y_idx, z_idx);
+	convert_voxel_idx_to_coords(idx, numVoxels, x_idx, y_idx, z_idx);
 
 	if (new_scanline)
 	{
@@ -203,8 +218,6 @@ std::array<ExactPoint, 8> calc_voxel_points(unsigned int idx, std::array<unsigne
 }
 
 
-
-// make a voxel with 4 tetrahedron?
 void calc_voxel_from_idx_tets(unsigned int idx, std::array<unsigned int, 3> numVoxels, ExactPoint min_point,
 	const std::array<ExactVector, 3>& voxel_strides, Exact_Polyhedron& voxel, bool* new_scanline)
 {
@@ -222,674 +235,695 @@ void calc_voxel_from_idx_hex(unsigned int idx, std::array<unsigned int, 3> numVo
 {
 	auto const p = calc_voxel_points(idx, numVoxels, min_point, voxel_strides);
 
-	unsigned int x_idx, y_idx, z_idx;
-	convert_voxel_idx_to_coords(idx, numVoxels[0], x_idx, y_idx, z_idx);
-
-	//std::cout << idx << "th voxel(" << x_idx << ", " << y_idx << ", " << z_idx << ")\n";
 	CGAL::make_hexahedron(p[0], p[1], p[3], p[2], p[6], p[4], p[5], p[7], voxel);
 	assert(voxel.is_valid());
 }
 
-float base_cellsize;
-ExactPoint global_min_point;
-int data_res[3];
-std::vector<bool> voxelize(Mesh surface, Exact_Polyhedron poly)
-{
+//output the grid into off file
+void writeGridIntoObj(const Grid3D& grid, const std::string& filepath){
+	std::ofstream file(filepath);
+	if(!file.is_open()){
+      std::cerr<<"Error:Unable to open the file"<<std::endl;
+	  return;
+	}
 
-	float se_size = 0.1f;
-	float margin = se_size + 2.0f / (2 * BASE_RESOLUTION);
+    std::vector<std::array<double,3>> vertices;
+    std::vector<std::array<int,4>> faces;
 
-	Tree mesh_tree(faces(poly).first, faces(poly).second, poly);
-	//Tree mesh_tree(faces(surface).first, faces(surface).second, surface);
-	CGAL::Bbox_3 bbox_origin = mesh_tree.bbox();
-	float longest_axis = std::max(bbox_origin.xmax() - bbox_origin.xmin(),
-		std::max(bbox_origin.ymax() - bbox_origin.ymin(), bbox_origin.zmax() - bbox_origin.zmin()));
-	float thickness = longest_axis / BASE_RESOLUTION;
-	float offset = 2 * thickness + margin;
-	float axis_len = longest_axis + 2 * offset;
-	float cell_size = axis_len / BASE_RESOLUTION;
+	//traverse the grid, calculate vertices and faces
+	for(int x=0;x<grid.size();++x){
+		for(int y=0;y<grid[0].size();++y){
+			for(int z=0;z<grid[0][0].size();++z){
+				if(grid[x][y][z]){
+					//calculate the position of 8 vertices of the voxel cube
+					int baseIndex=vertices.size()+1;
+					double dx=static_cast<double>(x);
+					double dy=static_cast<double>(y);
+					double dz=static_cast<double>(z);
 
-	float new_xmin = bbox_origin.xmin() - offset;
-	float new_ymin = bbox_origin.ymin() - offset;
-	float new_zmin = bbox_origin.zmin() - offset;
+                    //add 8 vertices of the cube
+					vertices.push_back({dx,dy,dz});
+					vertices.push_back({dx+1,dy,dz});
+					vertices.push_back({dx+1,dy+1,dz});
+					vertices.push_back({dx,dy+1,dz});
+					vertices.push_back({dx,dy,dz+1});
+					vertices.push_back({dx+1,dy,dz+1});
+					vertices.push_back({dx+1,dy+1,dz+1});
+					vertices.push_back({dx,dy+1,dz+1});
 
-	CGAL::Bbox_3 grid_aabb(
-		new_xmin,
-		new_ymin,
-		new_zmin,
-		new_xmin + axis_len,
-		new_ymin + axis_len,
-		new_zmin + axis_len
-	);
+					//add 6 faces of the cube
+					faces.push_back({baseIndex,baseIndex+1,baseIndex+2,baseIndex+3});
+					faces.push_back({baseIndex+4,baseIndex+5,baseIndex+6,baseIndex+7});
+					faces.push_back({baseIndex,baseIndex+1,baseIndex+5,baseIndex+4});
+					faces.push_back({baseIndex+1,baseIndex+2,baseIndex+6,baseIndex+5});
+					faces.push_back({baseIndex+2,baseIndex+3,baseIndex+7,baseIndex+6});
+					faces.push_back({baseIndex+3,baseIndex,baseIndex+4,baseIndex+7});
 
-	ExactPoint grid_min(grid_aabb.xmin(), grid_aabb.ymin(), grid_aabb.zmin());
 
-	// index where the actual data is finished at each axis
-	int data_resolution[3] = {
-		static_cast<int>(ceil((bbox_origin.xmax() - grid_aabb.xmin()) / cell_size)),
-		static_cast<int>(ceil((bbox_origin.ymax() - grid_aabb.ymin()) / cell_size)),
-		static_cast<int>(ceil((bbox_origin.zmax() - grid_aabb.zmin()) / cell_size))
-	};
-	data_res[0] =
-		static_cast<int>(ceil((bbox_origin.xmax() - grid_aabb.xmin()) / cell_size)),
-		data_res[1] =
-		static_cast<int>(ceil((bbox_origin.ymax() - grid_aabb.ymin()) / cell_size)),
-		data_res[2] =
-		static_cast<int>(ceil((bbox_origin.zmax() - grid_aabb.zmin()) / cell_size));
-	std::cout << "data resolution " << data_resolution[0] << ", " << data_resolution[1] << ", " << data_resolution[2] << "\n";
 
-	std::array<unsigned int, 3> numVoxels = { BASE_RESOLUTION, BASE_RESOLUTION, BASE_RESOLUTION };
-	std::array<ExactVector, 3> voxel_strides = { ExactVector(cell_size, 0, 0),
-		ExactVector(0, cell_size, 0), ExactVector(0, 0, cell_size) };
 
-	std::vector<unsigned int> intersecting_voxels;
-
-	auto numVoxel = pow(BASE_RESOLUTION, 3);// numVoxels[0] * numVoxels[1] * numVoxels[2];
-	bool interior = false;
-	unsigned int last_voxel = 0;
-	std::vector<bool> voxels_marking(numVoxel, false); // either outside 0, surface 1 or interior 2
-
-	Tree tree(faces(poly).first, faces(poly).second, poly);
-	Point_inside inside_tester(tree);
-
-	//Exact_Polyhedron voxels;
-	//std::cout << "Check for intersection\n";
-
-#pragma omp parallel for collapse(2) schedule(dynamic)
-	for (int i = 0; i < data_resolution[0]; i++) {
-		for (int j = 0; j < data_resolution[1]; j++) {
-			//if (j % 30 == 0) printf("voxelizing (%d, %d)\n", i, j);
-#pragma omp parallel for schedule(dynamic)
-			for (int k = 0; k < data_resolution[2]; k++) {
-
-				unsigned int idx = i * pow(BASE_RESOLUTION, 2) + j * BASE_RESOLUTION + k;
-
-				Exact_Polyhedron voxel = Exact_Polyhedron();
-				bool new_scanline;
-
-				calc_voxel_from_idx_tets(idx, numVoxels, grid_min, voxel_strides, voxel, &new_scanline);
-
-				if (CGAL::Polygon_mesh_processing::do_intersect(voxel, poly))
-				{
-#pragma omp critical
-					{
-						intersecting_voxels.push_back(idx);
-						voxels_marking[idx] = true;
-					}
-					continue;
-				}
-
-				bool inside = true;
-
-				for (auto vert : voxel.vertex_handles())
-				{
-					if (inside_tester(vert->point()) != CGAL::ON_BOUNDED_SIDE)
-					{
-						inside = false;
-					}
-				}
-
-				if (inside)
-				{
-#pragma omp critical
-					{
-						intersecting_voxels.push_back(idx);
-						voxels_marking[idx] = true;
-					}
 				}
 			}
 		}
 	}
 
+//write into the obj file
 
-	global_min_point = grid_min;
-	base_cellsize = cell_size;
-
-	return voxels_marking;
+//write the vertices
+for(const auto& vertex: vertices){
+	file<<"v "<<vertex[0]<<" "<<vertex[1]<<" "<<vertex[2]<<"\n";
+}
+    
+//write the faces
+for(const auto& face: faces){
+	file<<"f "<<face[0]<<" "<<face[1]<<" "<<face[2]<<" "<<face[3]<<"\n";
 }
 
+file.close();
+std::cout<<"3D grid has been written to file!"<<std::endl;
 
-bool check_8cube(int x, int y, int z, VOXEL_GRID prev_grid, int prev_resol) {
-	bool result = false;
-	for (int x_offset = 0; x_offset < 2; x_offset++) {
-		for (int y_offset = 0; y_offset < 2; y_offset++) {
-			for (int z_offset = 0; z_offset < 2; z_offset++) {
-				int flat_idx = (2 * x + x_offset) * prev_resol * prev_resol +
-					(2 * y + y_offset) * prev_resol + 2 * z + z_offset;
-				result = (result || prev_grid[flat_idx]);
-			}
-		}
-	}
-	if (result) {
-		int a = 3;
-	}
-	return result;
-}
-std::vector<Node> find_subcells(Node parent, MIPMAP_TYPE mipmap) {
-
-	std::vector<Node> subcells;
-	unsigned int parent_x, parent_y, parent_z;
-	int parent_resol = BASE_RESOLUTION / pow(2, parent.level);
-
-	convert_voxel_idx_to_coords(parent.pos, parent_resol, parent_x, parent_y, parent_z);
-
-	for (int i = 0; i < 2; i++)
-		for (int j = 0; j < 2; j++)
-			for (int k = 0; k < 2; k++) {
-				unsigned int idx =
-					coords_to_voxel_idx(
-						2 * parent_x + i,
-						2 * parent_y + j,
-						2 * parent_z + k,
-						parent_resol * 2
-					);
-
-				subcells.push_back({ parent.level - 1, idx });
-			}
-	return subcells;
 }
 
-MIPMAP_TYPE generate_mipmap(VOXEL_GRID grid) {
-	MIPMAP_TYPE mm_pyramid;
-	mm_pyramid.push_back(grid);
+//build hierarchy from the finest level and save into the mipmapTree
+MipmapTree buildHeirarchy(const Grid3D& fineGrid, int levels){  
+	MipmapTree mipmaptree;
+	Grid3D currentGrid=fineGrid;
 
-	int total_depth = log2(BASE_RESOLUTION) + 1;
+	for(int level=0; level<levels; ++level){
+	
+	//create a map for the current level
+	std::map<std::array<int,3>,bool> levelMap;
 
-	for (int depth = 1; depth < total_depth; depth++) {
-		int resol = BASE_RESOLUTION / pow(2, depth);
-		VOXEL_GRID mipmap(pow(resol, 3), false);
-
-		for (int i = 0; i < resol; i++) {
-			for (int j = 0; j < resol; j++) {
-				for (int k = 0; k < resol; k++) {
-					int flat_idx = i * resol * resol + j * resol + k;
-					mipmap[flat_idx] = check_8cube(i, j, k, mm_pyramid[depth - 1], resol * 2);
+	//assign the boolean value for the current level
+	for(int x=0;x<currentGrid.size(); ++x){
+		for(int y=0;y<currentGrid[x].size();++y){
+			for(int z=0;z<currentGrid[x][y].size(); ++z){
+				if(currentGrid[x][y][z]==true){
+					levelMap[{x,y,z}]=true;    //save the occupied voxel
 				}
 			}
 		}
-
-
-		mm_pyramid.push_back(mipmap);
 	}
-	return mm_pyramid;
-}
 
-typedef struct {
-	ExactPoint center;
-	float radius;
-	CGAL::Bbox_3 bbox;
-	bool sphere;
+	mipmaptree.push_back(levelMap);   //add into the mipmaptree
 
-}SE;
+	//build the next coarser level
+	if(level<levels-1){
+		//compute the dimensions of the new level
+		int newX=std::max(1,static_cast<int>(currentGrid.size()/2));
+		int newY=std::max(1,static_cast<int>(currentGrid[0].size()/2));
+		int newZ=std::max(1,static_cast<int>(currentGrid[0][0].size()/2));
 
-typedef struct {
-	float scale;
-	bool occupied;
-} CONTOUR_ELEMENT;
+        Grid3D nextGrid=initializeGrid(newX,newY,newZ);  //voxel grid of the new level
 
-CGAL::Bbox_3 calc_voxel_bbox(unsigned int idx, int resol, ExactPoint min_point,
-	float cell_size)
-{
-	unsigned int x_idx, y_idx, z_idx;
+		//traverse every voxels in the new level
+		for(int x=0;x<newX;++x){
+			for(int y=0;y<newY;++y){
+				for(int z=0;z<newZ;++z){
+					bool occupied=false;    //initialized the boolean value of every voxel
+					//calculate the offsets when use 8 finer grid to represent 1 coarser grid,the values of dx,dy,dz will iterate between 0,1
+					for(int dx=0;dx<2;++dx){
+						for(int dy=0;dy<2;++dy){
+							for(int dz=0;dz<2;++dz){
+								//calculate the 8(2*2*2) finer grids' positions which represent a coarser grid 
+								int fineX=2*x+dx;
+								int fineY=2*y+dy;
+								int fineZ=2*z+dz;
 
-	convert_voxel_idx_to_coords(idx, resol, x_idx, y_idx, z_idx);
-	float x_min = CGAL::to_double(min_point.x()) + x_idx * cell_size;
-	float y_min = CGAL::to_double(min_point.y()) + y_idx * cell_size;
-	float z_min = CGAL::to_double(min_point.z()) + z_idx * cell_size;
-	return CGAL::Bbox_3(
-		x_min,
-		y_min,
-		z_min,
-		x_min + cell_size,
-		y_min + cell_size,
-		z_min + cell_size
-	);
-}
-
-void define_se(Node cell, float radius, SE& se, bool sphere) {
-
-	CGAL::Bbox_3 voxel_bbox = calc_voxel_bbox(cell.pos, BASE_RESOLUTION / pow(2, cell.level), global_min_point, base_cellsize * pow(2, cell.level));
-	se.center = ExactPoint(
-		(voxel_bbox.xmax() + voxel_bbox.xmin()) / 2.0,
-		(voxel_bbox.ymax() + voxel_bbox.ymin()) / 2.0,
-		(voxel_bbox.zmax() + voxel_bbox.zmin()) / 2.0
-	);
-	se.radius = radius;
-	float xmin = CGAL::to_double(se.center.x()) - radius;
-	float ymin = CGAL::to_double(se.center.y()) - radius;
-	float zmin = CGAL::to_double(se.center.z()) - radius;
-	se.bbox = CGAL::Bbox_3(
-		xmin,
-		ymin,
-		zmin,
-		xmin + radius * 2,
-		ymin + radius * 2,
-		zmin + radius * 2
-	);
-	se.sphere = sphere;
-	return;
-}
-
-float get_shortest_dist(ExactPoint point, CGAL::Bbox_3 cell) {
-	double sphere_x = CGAL::to_double(point.x());
-	double sphere_y = CGAL::to_double(point.y());
-	double sphere_z = CGAL::to_double(point.z());
-	float closest_x = std::max(cell.xmin(), std::min(sphere_x, cell.xmax()));
-	float closest_y = std::max(cell.ymin(), std::min(sphere_y, cell.ymax()));
-	float closest_z = std::max(cell.zmin(), std::min(sphere_z, cell.zmax()));
-
-	// Calculate the distance from the sphere's center to the closest point on the bounding box
-	float dist = pow(sphere_x - closest_x, 2) + pow(sphere_y - closest_y, 2) + pow(sphere_z - closest_z, 2);
-	dist = std::sqrt(dist);
-
-	return dist;
-
-}
-
-bool does_overlap(Node cell, SE& se) {
-	int resol = BASE_RESOLUTION / pow(2, cell.level);
-	float cell_size = base_cellsize * pow(2, cell.level);
-	CGAL::Bbox_3 cell_bbox = calc_voxel_bbox(cell.pos, resol, global_min_point, cell_size);
-
-	if (se.bbox.xmax() >= cell_bbox.xmin() &&
-		se.bbox.ymax() >= cell_bbox.ymin() &&
-		se.bbox.zmax() >= cell_bbox.zmin() &&
-		se.bbox.xmin() <= cell_bbox.xmax() &&
-		se.bbox.ymin() <= cell_bbox.ymax() &&
-		se.bbox.zmin() <= cell_bbox.zmax()
-		) {
-		if (se.sphere) {
-			float shortest_dist = get_shortest_dist(se.center, cell_bbox);
-			if (shortest_dist > se.radius) {
-				return false;
-			}
-			else {
-				return true;
-			}
-		}
-		else return true;
-	}
-	else return false;
-}
-
-
-VOXEL_GRID executeDilation(MIPMAP_TYPE mipmap) {
-
-	VOXEL_GRID d_grid = mipmap[0];
-
-	int mipmap_depth = mipmap.size();
-
-	std::stack<Node> node_stack;
-	std::array<unsigned int, 3> num_voxels = { BASE_RESOLUTION, BASE_RESOLUTION, BASE_RESOLUTION };
-	for (int x = 0; x < BASE_RESOLUTION; x++) {
-		for (int y = 0; y < BASE_RESOLUTION; y++) {
-			for (int z = 0; z < BASE_RESOLUTION; z++) {
-				unsigned int flat_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
-				if (d_grid[flat_idx] == true) continue;
-				SE se;
-				Node current_point = { 0, flat_idx };
-				define_se(current_point, 2 * base_cellsize, se, false);
-				//define_se(current_point, base_cellsize * 0.6, se, true);
-				node_stack.push({ mipmap_depth - 1, 0 });
-				while (!node_stack.empty() && d_grid[flat_idx] == false) {
-					auto top_node = node_stack.top();
-					node_stack.pop();
-
-					if (top_node.level == 0) {
-						d_grid[flat_idx] = true;
-						//d_grid[top_node.pos] = true;
-						std::stack<Node> empty_stack;
-						node_stack.swap(empty_stack);
-						break;
-					}
-					else {
-						std::vector<Node> subcells = find_subcells(top_node, mipmap);
-						for (auto& subcell : subcells) {
-							bool subcell_val = mipmap[subcell.level][subcell.pos];
-							bool overlap = does_overlap(subcell, se);
-							if (subcell_val == true && does_overlap(subcell, se)) {
-								node_stack.push(subcell);
+								if(fineX<currentGrid.size() && fineY<currentGrid[0].size() && fineZ<currentGrid[0][0].size()){
+									occupied=occupied || currentGrid[fineX][fineY][fineZ];    //calculate the occupation of the coarser grid, it is considered occupied as long as one of the finer grid is occupied
+								}
 							}
 						}
-					}
+					} 
+
+					nextGrid[x][y][z]=occupied;
+
+				}
+			}
+		}
+
+		currentGrid=nextGrid;  //downscale recursively
+	}
+	}
+
+	return mipmaptree;
+}
+
+
+//print the mipmap for debug
+void printMipmap(const MipmapTree& mipmaptree){
+	for(size_t level=0; level<mipmaptree.size();++level){
+		std::cout<<"Level"<<level<<":\n";
+		for(const auto& [coord,occupied]: mipmaptree[level]){
+			if(occupied){
+				std::cout<<"("<<coord[0]<<","<<coord[1]<<","<<coord[2]<<"):"<<occupied<<std::endl;
+			}
+		}
+		std::cout<<"\n";
+	}
+}
+
+
+//dilation
+//check the intersection between the SE of a voxel and the node
+
+bool checkIntersect(const std::array<int,3>& node, int level,const std::array<int,3>& center,int seSize){
+	
+	//the region of the node box
+	int nodeBoxSize=1<<level;
+	int nodeBoxMinX=node[0] * nodeBoxSize, nodeBoxMaxX=(node[0]+1) * nodeBoxSize;
+	int nodeBoxMinY=node[1] * nodeBoxSize, nodeBoxMaxY=(node[1]+1) * nodeBoxSize;
+	int nodeBoxMinZ=node[2] * nodeBoxSize, nodeBoxMaxZ=(node[2]+1) * nodeBoxSize;
+
+
+	//the region of the SE
+	int seMinX=center[0]-seSize, seMaxX=center[0]+seSize+1;
+	int seMinY=center[1]-seSize, seMaxY=center[1]+seSize+1;
+	int seMinZ=center[2]-seSize, seMaxZ=center[2]+seSize+1;
+
+	//check the overlap
+	bool xOverlap=std::max(nodeBoxMinX,seMinX)< std::min(nodeBoxMaxX,seMaxX);
+	bool yOverlap=std::max(nodeBoxMinY,seMinY)< std::min(nodeBoxMaxY,seMaxY);
+	bool zOverlap=std::max(nodeBoxMinZ,seMinZ)< std::min(nodeBoxMaxZ,seMaxZ);
+
+return xOverlap && yOverlap && zOverlap;
+
+
+}
+
+bool isValid(int x, int y,int z,const std::array<int,3>& gridSizes ){
+	return x>=0 && x<gridSizes[0] && y>=0 && y< gridSizes[1] && z>=0 && z<gridSizes[2];
+}
+
+
+
+Grid3D parallelDilationA(Grid3D& grid, MipmapTree& mipmap, int se_scale){
+	Grid3D result = grid; 
+    int maxLevel = mipmap.size() - 1; 
+    int gridSizeX = grid.size();
+    int gridSizeY = grid[0].size();
+    int gridSizeZ = grid[0][0].size();
+	std::vector<std::array<int,3>> originalV;
+
+	for(int x=0;x<gridSizeX;++x){
+		for(int y=0;y<gridSizeY;++y){
+			for(int z=0;z<gridSizeZ;++z){
+				if(result[x][y][z]==false){
+					originalV.push_back({x,y,z});
 				}
 			}
 		}
 	}
-	return d_grid;
-}
 
-MIPMAP_TYPE voxelize_and_mipmap(std::string input_path) {
+   struct Pair{
+	int level;
+	std::array<int,3> position;
+   };
+ 
+  for(auto ov:originalV){
+     
+	 std::vector<Pair> stack;
+      stack.push_back({maxLevel, {0,0,0}});
+	  while(!stack.empty() && result[ov[0]][ov[1]][ov[2]]!=true){
+		Pair top=stack.back();
+         stack.pop_back();
+		 if(top.level==0){
+   
+			result[ov[0]][ov[1]][ov[2]]=true;
+			
+		 }
+		 else{
+			for(int dx=0;dx<=1;++dx){
+				for(int dy=0; dy<=1;++dy){
+					for(int dz=0;dz<=1;++dz){
+						 std::array<int, 3> subNode = {
+                                           top.position[0]*2 + dx ,
+                                            top.position[1]*2 + dy ,
+                                            top.position[2] *2+ dz 
+											};
 
-	std::cout << "Loading surface\n";
-	Exact_Polyhedron poly;
-	if (!PMP::IO::read_polygon_mesh(input_path, poly) || !CGAL::is_triangle_mesh(poly))
-	{
-		std::cerr << "Invalid input.\n";
-		exit(-1);
-	}
-	Mesh surface;
-	if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(input_path, surface) || surface.is_empty())
-	{
-		std::cerr << "Invalid input file.\n";
-		exit(-1);
-	}
-	int t1 = clock();
-	auto voxel_grid = voxelize(surface, poly);
-
-	int t2 = clock();
-
-	std::cout << "start generating mipmap\n";
-	MIPMAP_TYPE mipmap_pyramid = generate_mipmap(voxel_grid);
-	int t3 = clock();
-	std::cout << "mipmap done. start dilation\n";
-
-	printf("Voxelize elapsed time: %5.3f sec\n", float(t2 - t1) / CLOCKS_PER_SEC);
-	printf("Generate Mipmap elapsed time: %5.3f sec\n", float(t3 - t2) / CLOCKS_PER_SEC);
-	printf("Total elapsed time (from voxelization to mipmap): %5.3f sec\n", float(t3 - t1) / CLOCKS_PER_SEC);
-	return mipmap_pyramid;
-}
-
-bool check_neighbor(VOXEL_GRID& d_grid, char axis, int center_x, int center_y, int center_z) {
-	int radius = 1;
-
-	unsigned int center_idx = coords_to_voxel_idx(center_x, center_y, center_z, BASE_RESOLUTION);
-	bool center_val = d_grid[center_idx];
-	bool result = false;
-
-	// check for z-1, z+1
-	for (int offset = -radius; offset <= radius; offset++) {
-
-		if (offset == 0) continue;
-
-		int x = center_x, y = center_y, z = center_z;
-
-		if (axis == 'x') x += offset;
-		else if (axis == 'y') y += offset;
-		else if (axis == 'z') z += offset;
-
-		if (!(x >= 0 && x < BASE_RESOLUTION &&
-			y >= 0 && y < BASE_RESOLUTION &&
-			z >= 0 && z < BASE_RESOLUTION))
-			continue;
-
-		unsigned int neighbor_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
-		result = result || (d_grid[neighbor_idx] != center_val);
-	}
-
-	return result;
-}
-
-VOXEL_GRID extract_contour(VOXEL_GRID& d_grid) {
-
-	VOXEL_GRID contour(d_grid.size(), false);
-
-
-	for (int x = 0; x < BASE_RESOLUTION; x++) {
-		for (int y = 0; y < BASE_RESOLUTION; y++) {
-			for (int z = 0; z < BASE_RESOLUTION; z++) {
-				unsigned int center_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
-				bool center_val = d_grid[center_idx];
-				bool result =
-					check_neighbor(d_grid, 'z', x, y, z) ||
-					check_neighbor(d_grid, 'y', x, y, z) ||
-					check_neighbor(d_grid, 'x', x, y, z);
-
-				contour[center_idx] = !center_val && result;
+                       if(mipmap[top.level - 1].count(subNode) &&
+                         mipmap[top.level - 1].at(subNode) ){
+				  
+				  if( checkIntersect(subNode, top.level - 1, ov, se_scale)){
+                           stack.push_back({top.level-1,subNode});
+					        }
+						 }
+                    
+					}
+				}
 			}
-		}
-	}
+		 }
+	  }
+  }
 
-	return contour;
+return result;
+
 }
 
-float get_shortest_dist(CGAL::Bbox_3& a, CGAL::Bbox_3& b) {
-	// Start by calculating the distance on each axis (x, y, and z)
-	float distX = 0.0f;
-	if (a.xmax() < b.xmin()) {
-		distX = b.xmin() - a.xmax();  // AABB a is to the left of AABB b
-	}
-	else if (a.xmin() > b.xmax()) {
-		distX = a.xmin() - b.xmax();  // AABB a is to the right of AABB b
-	}
 
-	float distY = 0.0f;
-	if (a.ymax() < b.ymin()) {
-		distY = b.ymin() - a.ymax();  // AABB a is below AABB b
-	}
-	else if (a.ymin() > b.ymax()) {
-		distY = a.ymin() - b.ymax();  // AABB a is above AABB b
-	}
+//extract 6-connected contour of dilatioin
+Grid3D extract_contour(Grid3D& dilation){
+	Grid3D result=dilation;
+	int gridSizeX=dilation.size();
+	int gridSizeY=dilation[0].size();
+	int gridSizeZ=dilation[0][0].size();
 
-	float distZ = 0.0f;
-	if (a.zmax() < b.zmin()) {
-		distZ = b.zmin() - a.zmax();  // AABB a is in front of AABB b
-	}
-	else if (a.zmin() > b.zmax()) {
-		distZ = a.zmin() - b.zmax();  // AABB a is behind AABB b
-	}
+  	std::vector<std::array<int,3>> originalV;
 
-	// The total shortest distance is the Euclidean distance between the gaps on each axis
-	return std::sqrt(distX * distX + distY * distY + distZ * distZ);
-}
-
-bool does_overlap_erode(Node cell, CGAL::Bbox_3 p_bbox) {
-	int resol = BASE_RESOLUTION / pow(2, cell.level);
-	float cell_size = base_cellsize * pow(2, cell.level);
-
-	float scale = 0.6f;
-	float base_radius = base_cellsize;
-	float radius = base_radius * scale;
-
-	CGAL::Bbox_3 cell_bbox = calc_voxel_bbox(cell.pos, resol, global_min_point, cell_size);
-	CGAL::Bbox_3 cell_bbox_pad(
-		cell_bbox.xmin() - radius,
-		cell_bbox.ymin() - radius,
-		cell_bbox.zmin() - radius,
-		cell_bbox.xmax() + radius,
-		cell_bbox.ymax() + radius,
-		cell_bbox.zmax() + radius
-	);
-
-	if (p_bbox.xmax() >= cell_bbox_pad.xmin() &&
-		p_bbox.ymax() >= cell_bbox_pad.ymin() &&
-		p_bbox.zmax() >= cell_bbox_pad.zmin() &&
-		p_bbox.xmin() <= cell_bbox_pad.xmax() &&
-		p_bbox.ymin() <= cell_bbox_pad.ymax() &&
-		p_bbox.zmin() <= cell_bbox_pad.zmax()
-		) {
-
-		float shortest_dist = get_shortest_dist(p_bbox, cell_bbox);
-
-		if (shortest_dist > radius) {
-			return false;
-		}
-		else {
-			return true;
-		}
-	}
-	return false;
-}
-
-void execute_erosion(MIPMAP_TYPE& contour_mipmap, VOXEL_GRID& e_grid, VOXEL_GRID& voxel_grid) {
-
-	int mipmap_depth = contour_mipmap.size();
-
-	std::stack<Node> node_stack;
-
-	for (int x = 0; x < BASE_RESOLUTION; x++) {
-		//if (x % 5 == 0) std::cout << "erosion x : " << x << "\n";
-		for (int y = 0; y < BASE_RESOLUTION; y++) {
-			for (int z = 0; z < BASE_RESOLUTION; z++) {
-				int flat_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
-				if (e_grid[flat_idx] == false || voxel_grid[flat_idx] == true) continue;
-				CGAL::Bbox_3 p_bbox = calc_voxel_bbox(flat_idx, BASE_RESOLUTION, global_min_point, base_cellsize);
-
-				node_stack.push({ mipmap_depth - 1, 0 });
-				while (!node_stack.empty() && e_grid[flat_idx] == true) {
-					auto top_node = node_stack.top();
-					node_stack.pop();
-
-					if (top_node.level == 0) {
-						e_grid[flat_idx] = false;
-						std::stack<Node> empty_stack;
-						node_stack.swap(empty_stack);
-						break;
-					}
-					else {
-						std::vector<Node> subcells = find_subcells(top_node, contour_mipmap);
-						for (auto& subcell : subcells) {
-							bool subcell_val = contour_mipmap[subcell.level][subcell.pos];
-							bool overlap = does_overlap_erode(subcell, p_bbox);
-							if (subcell_val == true && overlap) {
-								node_stack.push(subcell);
-							}
-						}
-					}
+    //collect the voxels
+	for(int x=1;x<gridSizeX-1;++x){
+		for(int y=1;y<gridSizeY-1;++y){
+			for(int z=1;z<gridSizeZ-1;++z){
+				if(result[x][y][z]==true){
+					originalV.push_back({x,y,z});
 				}
 			}
 		}
 	}
+
+   for(auto ov : originalV){
+     
+	 //check  6 neighboors of the voxel
+	   if(dilation[ov[0]+1][ov[1]][ov[2]]==true &&
+	      dilation[ov[0]-1][ov[1]][ov[2]]==true &&
+	      dilation[ov[0]][ov[1]+1][ov[2]]==true &&
+	      dilation[ov[0]][ov[1]-1][ov[2]]==true &&
+	      dilation[ov[0]][ov[1]][ov[2]+1]==true &&
+	      dilation[ov[0]][ov[1]][ov[2]-1]==true ){
+			result[ov[0]][ov[1]][ov[2]]=false;
+		  }
+   }
+
+   return result;
+
+
+}
+
+Grid3D cut_the_half(Grid3D& grid){
+
+    Grid3D result=grid;
+	int gridSizeX=grid.size();
+	int gridSizeY=grid[0].size();
+	int gridSizeZ=grid[0][0].size();
+
+	for(int x=0; x<gridSizeX; ++x){
+		for(int y=0; y<gridSizeY; ++y){
+			for(int z=gridSizeZ/2;z<gridSizeZ; ++z){
+				result[x][y][z]=false;
+			}
+		}
+	}
+
+return result;
+
 }
 
 
-struct PointHash {
-	std::size_t operator()(const ExactPoint& p) const {
-		auto h1 = std::hash<double>{}(CGAL::to_double(p.x()));
-		auto h2 = std::hash<double>{}(CGAL::to_double(p.y()));
-		auto h3 = std::hash<double>{}(CGAL::to_double(p.z()));
-		return h1 ^ (h2 << 1) ^ (h3 << 2);
+
+//create sphere SE
+std::vector<std::array<int,3>> generate_sphere_offsets(int radius){
+std::vector<std::array<int,3>> offsets;
+
+for(int x=-radius; x<=radius; ++x){
+	for(int y=-radius; y<=radius; ++y){
+		for(int z=-radius; z<=radius; ++z){
+			if((x*x+y*y+z*z)<=std::pow(radius,2)){
+				offsets.push_back({x,y,z});
+			}
+		}
 	}
+}
+return offsets;
+	
+}
+
+
+int getIndex(int x, int y, int z, const std::array<int, 3>& gridSizes) {
+    return x + y * gridSizes[0] + z * gridSizes[0] * gridSizes[1];
+}
+
+bool check_intersect_erosionE(const std::array<int,3>& node, int level,const std::array<int,3>& voxelp,int seSize,const std::array<int,3>& gridSizes,std::vector<std::array<int,3>>& offsets){
+
+
+bool result=false;
+//the rigoin of dilated subnode box
+//the rigion of the subnode box
+int nodeBoxSize=1<<level;
+int nodeBoxMinX=node[0] * nodeBoxSize, nodeBoxMaxX=(node[0]+1) * nodeBoxSize;
+int nodeBoxMinY=node[1] * nodeBoxSize, nodeBoxMaxY=(node[1]+1) * nodeBoxSize;
+int nodeBoxMinZ=node[2] * nodeBoxSize, nodeBoxMaxZ=(node[2]+1) * nodeBoxSize;
+
+//the rigon of dilated subnode box
+std::vector<uint8_t> dilated_voxels(gridSizes[0] * gridSizes[1] * gridSizes[2], 0);
+
+//do the dilation
+#pragma omp parallel for collapse(3) 
+for(int x=nodeBoxMinX; x<nodeBoxMaxX; ++x){
+	for(int y=nodeBoxMinY; y<nodeBoxMaxY; ++y){
+		for(int z=nodeBoxMinZ; z<nodeBoxMaxZ; ++z){
+           std::array<int,3> box_voxel={x,y,z};
+           for(const auto& offset: offsets){
+               int nx=x+offset[0];
+               int ny=y+offset[1];
+               int nz=z+offset[2];
+			   if(isValid(nx,ny,nz,gridSizes)){
+				  dilated_voxels[getIndex(nx, ny, nz, gridSizes)] = 1;
+			   }
+
+		   }
+
+		  
+		}
+	}
+}
+
+
+//calculate the rigion of checked voxel box
+for(int x=voxelp[0];x<=voxelp[0]+1; ++x){
+	for(int y=voxelp[1]; y<=voxelp[1]+1; ++y){
+		for(int z=voxelp[2]; z<=voxelp[2]+1; ++z){
+			std::array<int,3> pos={x,y,z};
+			
+		  int idx=getIndex(x, y, z, gridSizes);
+		  if (dilated_voxels[idx]) {
+                    result= true;
+					break;
+                }
+		    
+		}
+	}
+}
+
+return result;
+
+}
+
+
+
+
+bool check_intersect_erosion(const std::array<int,3>& node, int level,
+                              const std::array<int,3>& voxelp, int seSize,
+                              const std::array<int,3>& gridSizes,
+                              const std::vector<std::array<int,3>>& offsets) {
+
+    bool result = false;
+    int nodeBoxSize = 1 << level;
+    int nodeBoxMinX = node[0] * nodeBoxSize, nodeBoxMaxX = (node[0] + 1) * nodeBoxSize;
+    int nodeBoxMinY = node[1] * nodeBoxSize, nodeBoxMaxY = (node[1] + 1) * nodeBoxSize;
+    int nodeBoxMinZ = node[2] * nodeBoxSize, nodeBoxMaxZ = (node[2] + 1) * nodeBoxSize;
+
+    std::vector<uint8_t> dilated_voxels(gridSizes[0] * gridSizes[1] * gridSizes[2], 0);
+
+    #pragma omp parallel for
+    for (int x = nodeBoxMinX; x < nodeBoxMaxX; ++x) {
+        for (int y = nodeBoxMinY; y < nodeBoxMaxY; ++y) {
+            for (int z = nodeBoxMinZ; z < nodeBoxMaxZ; ++z) {
+                int baseIdx = getIndex(x, y, z, gridSizes);  
+                for (const auto& offset : offsets) {
+                    int nx = x + offset[0];
+                    int ny = y + offset[1];
+                    int nz = z + offset[2];
+
+                    if (isValid(nx, ny, nz, gridSizes)) {
+                        int idx = getIndex(nx, ny, nz, gridSizes);
+                        dilated_voxels[idx] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    
+    for (int x = voxelp[0]; x <= voxelp[0] + 1; ++x) {
+        for (int y = voxelp[1]; y <= voxelp[1] + 1; ++y) {
+            for (int z = voxelp[2]; z <= voxelp[2] + 1; ++z) {
+                int idx = getIndex(x, y, z, gridSizes);
+                if (dilated_voxels[idx]) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+
+
+bool check_intersect_erosion(const std::array<int,3>& node, int level,const std::array<int,3>& voxelp,int seSize,const std::array<int,3> gridSizes){
+
+//the region of dilated subnode box 
+	//the region of the node box
+	int nodeBoxSize=1<<level;
+	int nodeBoxMinX=node[0] * nodeBoxSize, nodeBoxMaxX=(node[0]+1) * nodeBoxSize;
+	int nodeBoxMinY=node[1] * nodeBoxSize, nodeBoxMaxY=(node[1]+1) * nodeBoxSize;
+	int nodeBoxMinZ=node[2] * nodeBoxSize, nodeBoxMaxZ=(node[2]+1) * nodeBoxSize;
+
+	//the offset created by sphere SE
+	int newBoxMinX=std::max(0,nodeBoxMinX-seSize);
+	int newBoxMaxX=std::min(nodeBoxMaxX+seSize,gridSizes[0]);
+	int newBoxMinY=std::max(0,nodeBoxMinY-seSize);
+	int newBoxMaxY=std::min(nodeBoxMaxY+seSize,gridSizes[1]);
+	int newBoxMinZ=std::max(0,nodeBoxMinZ-seSize);
+	int newBoxMaxZ=std::min(nodeBoxMaxZ+seSize,gridSizes[2]);
+
+
+   //the region of checked voxel box
+   int voxelMinX=voxelp[0];
+   int voxelMaxX=voxelp[0]+1;
+   int voxelMinY=voxelp[1];
+   int voxelMaxY=voxelp[1]+1;
+   int voxelMinZ=voxelp[2];
+   int voxelMaxZ=voxelp[2]+1;
+
+   //check the overlap
+   bool isOverlapX= std::max(newBoxMinX,voxelMinX)<std::min(newBoxMaxX,voxelMaxX);
+   bool isOverlapY= std::max(newBoxMinY,voxelMinY)<std::min(newBoxMaxY,voxelMaxY);
+   bool isOverlapZ= std::max(newBoxMinZ,voxelMinZ)<std::min(newBoxMaxZ,voxelMaxZ);
+
+return isOverlapX && isOverlapY && isOverlapZ;
+
+}
+
+
+
+//test erosion
+struct Pair {
+    int level;
+    std::array<int, 3> position;
 };
 
-std::array<ExactPoint, 8> compute_voxel_vertices(
-	const ExactPoint& origin,
-	const std::array<ExactVector, 3>& voxel_strides)
-{
-	return { origin,
-			origin + voxel_strides[0],
-			origin + voxel_strides[1],
-			origin + voxel_strides[2],
-			origin + voxel_strides[0] + voxel_strides[1],
-			origin + voxel_strides[0] + voxel_strides[2],
-			origin + voxel_strides[1] + voxel_strides[2],
-			origin + voxel_strides[0] + voxel_strides[1] + voxel_strides[2] };
+Grid3D spaciallyErosionT(Grid3D& dilation, Grid3D& grid, MipmapTree& mipmap, int seScale,std::vector<std::array<int,3>>& offsets) {
+    Grid3D result = dilation;
+    int maxLevel = mipmap.size() - 1;
+    int gridSizeX = grid.size();
+    int gridSizeY = grid[0].size();
+    int gridSizeZ = grid[0][0].size();
+    std::vector<std::array<int, 3>> originalV;
+
+    
+    #pragma omp parallel
+    {
+        std::vector<std::array<int, 3>> local_originalV;
+        #pragma omp for collapse(3) nowait
+        for (int x = 0; x < gridSizeX; ++x) {
+            for (int y = 0; y < gridSizeY; ++y) {
+                for (int z = 0; z < gridSizeZ; ++z) {
+                    if (result[x][y][z] == true && grid[x][y][z] == false) {
+                        local_originalV.push_back({x, y, z});
+                    }
+                }
+            }
+        }
+        #pragma omp critical
+        originalV.insert(originalV.end(), local_originalV.begin(), local_originalV.end());
+    }
+
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < originalV.size(); ++i) {
+        auto ov = originalV[i];
+        std::deque<Pair> stack;
+        stack.push_back({maxLevel, {0, 0, 0}});
+
+        while (!stack.empty() && result[ov[0]][ov[1]][ov[2]] == true) {
+            Pair top = stack.back();
+            stack.pop_back();
+
+            if (top.level == 0) {
+                result[ov[0]][ov[1]][ov[2]] = false;
+            } else {
+
+                for (int dx = 0; dx <= 1; ++dx) {
+                    for (int dy = 0; dy <= 1; ++dy) {
+                        for (int dz = 0; dz <= 1; ++dz) {
+                            std::array<int, 3> subNode = {
+                                top.position[0] * 2 + dx,
+                                top.position[1] * 2 + dy,
+                                top.position[2] * 2 + dz
+                            };
+
+                            if (mipmap[top.level - 1].count(subNode) &&
+                            mipmap[top.level - 1].at(subNode) &&
+                            check_intersect_erosionE(subNode, top.level - 1, ov, seScale, {gridSizeX, gridSizeY, gridSizeZ}, offsets)) {
+                            stack.push_back({top.level - 1, subNode});
+                        }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
 }
+
+//meshing
+
+
+const std::array<std::array<int, 3>, 6> neighbors = {{
+    {{-1, 0, 0}}, {{1, 0, 0}},  
+    {{0, -1, 0}}, {{0, 1, 0}},  
+    {{0, 0, -1}}, {{0, 0, 1}}   
+}};
+
+std::array<ExactPoint, 8> compute_voxel_vertices(
+    const ExactPoint& origin,
+    const std::array<ExactVector, 3>& voxel_strides)
+{
+    return {origin,
+            origin + voxel_strides[0],
+            origin + voxel_strides[1],
+            origin + voxel_strides[2],
+            origin + voxel_strides[0] + voxel_strides[1],
+            origin + voxel_strides[0] + voxel_strides[2],
+            origin + voxel_strides[1] + voxel_strides[2],
+            origin + voxel_strides[0] + voxel_strides[1] + voxel_strides[2]};
+}
+
+
+
+
+
 
 void add_voxel_faces(
-	ExactMesh& mesh,
-	const std::array<ExactMesh::Vertex_index, 8>& mesh_vertices,
-	const std::array<bool, 6>& exposed_faces)
+    Exact_Polyhedron& mesh,
+    const std::array<ExactPoint, 8>& vertices,
+    const std::array<bool, 6>& exposed_faces)
 {
-	static const std::array<std::array<int, 4>, 6> faces = { {
-		{{0, 3, 6, 2}},  // -X
-		{{1, 4, 7, 5}},  // +X
-		{{1, 5, 3, 0}},  // -Y
-		{{2, 6, 7, 4}},  // +Y
-		{{1, 0, 2, 4}},  // -Z
-		{{3, 5, 7, 6}}   // +Z
-	} };
+  static const std::array<std::array<int, 4>, 6> faces = {{
+        {{0, 3, 6, 2}},  // -X
+        {{1, 4, 7, 5}},  // +X
+        {{1, 5, 3, 0}},  // -Y
+        {{2, 6, 7, 4}},  // +Y
+        {{1, 0, 2, 4}},  // -Z
+        {{3, 5, 7, 6}}   // +Z
+    }};
 
-	for (int i = 0; i < 6; ++i) {
-		if (exposed_faces[i]) {
-			mesh.add_face(mesh_vertices[faces[i][0]], mesh_vertices[faces[i][1]], mesh_vertices[faces[i][2]]);
-			mesh.add_face(mesh_vertices[faces[i][2]], mesh_vertices[faces[i][3]], mesh_vertices[faces[i][0]]);
+    for (int i = 0; i < 6; ++i) {
+        if (exposed_faces[i]) {
+           mesh.make_triangle(vertices[faces[i][0]], vertices[faces[i][1]], vertices[faces[i][2]]);
+          mesh.make_triangle(vertices[faces[i][2]], vertices[faces[i][3]], vertices[faces[i][0]]);
+         
+		
 		}
-	}
+    }
 }
 
-ExactMesh extract_surface_from_voxels(
-	const VOXEL_GRID& grid,
-	const std::array<ExactVector, 3>& voxel_strides,
-	const ExactPoint& origin
-	)
+void extract_surface_from_voxels(
+    const Grid3D& grid,
+    const std::array<ExactVector, 3>& voxel_strides,
+    const ExactPoint& origin,
+    const std::string outputfile)
 {
-	const std::array<std::array<int, 3>, 6> neighbors = { {
-		{{-1, 0, 0}}, {{1, 0, 0}},  // X 
-		{{0, -1, 0}}, {{0, 1, 0}},  // Y 
-		{{0, 0, -1}}, {{0, 0, 1}}   // Z
-	} };
+	Exact_Polyhedron output_mesh;
+    size_t nx = grid.size(), ny = grid[0].size(), nz = grid[0][0].size();
+    for (size_t x = 0; x < nx; ++x) {
+        for (size_t y = 0; y < ny; ++y) {
+            for (size_t z = 0; z < nz; ++z) {
+                if (!grid[x][y][z]) continue;  
 
-	ExactMesh output_mesh;
-	size_t nx = BASE_RESOLUTION, ny = BASE_RESOLUTION, nz = BASE_RESOLUTION;
+                std::array<ExactPoint, 8> voxel_vertices =
+                    compute_voxel_vertices(origin + x * voxel_strides[0] + y * voxel_strides[1] + z * voxel_strides[2], voxel_strides);
 
-	std::unordered_map<ExactPoint, ExactMesh::Vertex_index, PointHash> vertex_map;
+                std::array<bool, 6> exposed_faces = {true, true, true, true, true, true};
+                for (int i = 0; i < 6; ++i) {
+                    int nx = x + neighbors[i][0];
+                    int ny = y + neighbors[i][1];
+                    int nz = z + neighbors[i][2];
+                    if (nx >= 0 && nx < grid.size() &&
+                        ny >= 0 && ny < grid[0].size() &&
+                        nz >= 0 && nz < grid[0][0].size() &&
+                        grid[nx][ny][nz]) {
+                        exposed_faces[i] = false;
+                    }
+                }
 
-	for (int x = 0; x < nx; ++x) {
-		for (int y = 0; y < ny; ++y) {
-			for (int z = 0; z < nz; ++z) {
-				int idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
-				if (!grid[idx]) continue;
+                add_voxel_faces(output_mesh, voxel_vertices, exposed_faces);
+            }
+        }
+    }
 
-				std::array<ExactPoint, 8> voxel_vertices =
-					compute_voxel_vertices(origin + x * voxel_strides[0] + y * voxel_strides[1] + z * voxel_strides[2], voxel_strides);
+if (!CGAL::is_closed(output_mesh)) {
+    std::cerr << "Warning: Mesh is not closed! Trying to close it..." << std::endl;
 
-
-				std::array<ExactMesh::Vertex_index, 8> mesh_vertices;
-				for (int i = 0; i < 8; ++i) {
-					auto it = vertex_map.find(voxel_vertices[i]);
-					if (it == vertex_map.end()) {
-
-						ExactMesh::Vertex_index v = output_mesh.add_vertex(voxel_vertices[i]);
-						mesh_vertices[i] = v;
-						vertex_map[voxel_vertices[i]] = v;
-					}
-					else {
-						mesh_vertices[i] = it->second;
-					}
-				}
-
-				std::array<bool, 6> exposed_faces = { true, true, true, true, true, true };
-				for (int i = 0; i < 6; ++i) {
-					int nx = x + neighbors[i][0];
-					int ny = y + neighbors[i][1];
-					int nz = z + neighbors[i][2];
-					int n_idx = coords_to_voxel_idx(nx, ny, nz, BASE_RESOLUTION);
-					if (nx >= 0 && nx < BASE_RESOLUTION &&
-						ny >= 0 && ny < BASE_RESOLUTION &&
-						nz >= 0 && nz < BASE_RESOLUTION &&
-						grid[n_idx]) {
-						exposed_faces[i] = false;
-					}
-				}
-
-				add_voxel_faces(output_mesh, mesh_vertices, exposed_faces);
-			}
-		}
-	}
-
-
-
-
-	return output_mesh;
+    PMP::stitch_borders(output_mesh);
+    PMP::triangulate_faces(output_mesh);
+    
+    if (CGAL::is_closed(output_mesh)) {
+        std::cout << "Mesh is now closed after stitching!" << std::endl;
+    } else {
+        std::cerr << "Error: Mesh is still not closed!" << std::endl;
+    }
 }
 
-void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNumFaces) {
+if (!PMP::is_outward_oriented(output_mesh)) {
+    PMP::reverse_face_orientations(output_mesh);
+    std::cout << "Fixed flipped face orientations!" << std::endl;
+}
 
-	tri::Smooth<MyMesh>::VertexCoordLaplacianHC(vcg_mesh, smoothIterations);
 
-	TriEdgeCollapseQuadricParameter qparams;
+std::ofstream output(outputfile);
+ if(!output){
+	std::cerr<<"Error: Cannot open output file"<<outputfile<<std::endl;
+	return;
+   }
+
+   output<<output_mesh;
+   output.close();
+
+   std::cout<<"meshing is done successfully!"<<std::endl;
+
+
+}
+
+
+
+//decimation
+
+void decimation(MyMesh& vcg_mesh, int& smooth, int& FinalSize ){
+tri::Smooth<MyMesh>::VertexCoordLaplacianHC(vcg_mesh, smooth);
+TriEdgeCollapseQuadricParameter qparams;
 	qparams.QualityThr = .3;
 
 	float TargetError = std::numeric_limits<float>::max();
-	std::cout << "target error: " << TargetError << "\n";
-	TargetError = 0.001f;
-
-	qparams.QualityCheck = true; 
+	TargetError = 0.01f;
+	qparams.QualityCheck = true;  
 	qparams.NormalCheck = true;  
-	qparams.OptimalPlacement = true; 
-	qparams.ScaleIndependent = true; 
+	qparams.OptimalPlacement = true;  
+	qparams.ScaleIndependent = true;  
 	qparams.PreserveTopology = true;
+    
 
 	bool CleaningFlag = true;
 	if (CleaningFlag) {
 		int dup = tri::Clean<MyMesh>::RemoveDuplicateVertex(vcg_mesh);
 		int unref = tri::Clean<MyMesh>::RemoveUnreferencedVertex(vcg_mesh);
-
-		//printf("Removed %i duplicate and %i unreferenced vertices from mesh \n", dup, unref);
+		printf("Removed %i duplicate and %i unreferenced vertices from mesh \n", dup, unref);
 	}
-	int FinalSize = 400;
-	//printf("reducing it to %i\n", FinalSize);
+	//int FinalSize = 400;
+	printf("reducing it to %i\n", FinalSize);
 
 	vcg::tri::UpdateBounding<MyMesh>::Box(vcg_mesh);
 
@@ -899,19 +933,16 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 	int t1 = clock();
 	DeciSession.Init<MyTriEdgeCollapse>();
 	int t2 = clock();
+	//printf("BEFORE: mesh  %d %d \n", vcg_mesh.vn, vcg_mesh.fn);
+    //printf("Initial Heap Size %i\n", int(DeciSession.h.size()));
 
-	// printf("BEFORE: mesh  %d %d \n", vcg_mesh.vn, vcg_mesh.fn);
-	// printf("Initial Heap Size %i\n", int(DeciSession.h.size()));
-
-	DeciSession.SetTargetSimplices(targetNumFaces);
+	DeciSession.SetTargetSimplices(FinalSize);
 	DeciSession.SetTimeBudget(0.5f);
 	DeciSession.SetTargetOperations(100000);
 	//if (TargetError < std::numeric_limits<float>::max()) DeciSession.SetTargetMetric(TargetError);
 
-	//while (DeciSession.DoOptimization() && vcg_mesh.fn > FinalSize && DeciSession.currMetric < TargetError)
-
-	while (DeciSession.DoOptimization() && vcg_mesh.fn > targetNumFaces)
-		printf("Current Mesh size %7i heap sz %9i err %9g \n", vcg_mesh.fn, int(DeciSession.h.size()), DeciSession.currMetric);
+  	while (DeciSession.DoOptimization() && vcg_mesh.fn > FinalSize )
+	//	printf("Current Mesh size %7i heap sz %9i err %9g \n", vcg_mesh.fn, int(DeciSession.h.size()), DeciSession.currMetric);
 
 	int t3 = clock();
 	if (CleaningFlag) {
@@ -921,16 +952,175 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 		int dup_face = tri::Clean<MyMesh>::RemoveDuplicateFace(vcg_mesh);
 
 		//tri::UpdateNormal<MyMesh>::PerVertexPerFace(vcg_mesh);
-
 		//printf("Removed %i duplicate and %i unreferenced vertices from mesh \n", dup, unref);
 		//printf("Removed %i duplicate and %i unreferenced faces from mesh \n", dup_face, deg_face);
 	}
 
 	//printf("mesh  %d %d Error %g \n", vcg_mesh.vn, vcg_mesh.fn, DeciSession.currMetric);
-	printf("\nCompleted decimation in (%5.3f+%5.3f) sec\n", float(t2 - t1) / CLOCKS_PER_SEC, float(t3 - t2) / CLOCKS_PER_SEC);
+	//printf("\nCompleted in (%5.3f+%5.3f) sec\n", float(t2 - t1) / CLOCKS_PER_SEC, float(t3 - t2) / CLOCKS_PER_SEC);
 
-	//return vcg_mesh;
 
+
+}
+
+
+ExactPoint global_min_point;
+
+
+void voxelizationA(const std::string& inputfile,
+                  Grid3D& grid,
+                  const std::string& outputfile,
+                  std::array<unsigned int, 3>& numVoxels ,
+                  std::array<ExactPoint, 8>& aabb_points,
+                  std::array<ExactVector, 3>& voxel_strides,
+				  int & se_scale){
+
+std::cout << "Loading surface\n";
+    Exact_Polyhedron poly;
+    if (!PMP::IO::read_polygon_mesh(inputfile, poly) || !CGAL::is_triangle_mesh(poly))
+    {
+        std::cerr << "Invalid input.\n";
+        return ;
+    }
+    Mesh surface;
+    if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(inputfile, surface) || surface.is_empty())
+    {
+        std::cerr << "Invalid input file.\n";
+        return ;
+    }
+
+	std::cout << "Compute AABB\n";
+    
+    CGAL::Bbox_3 bbox = CGAL::Polygon_mesh_processing::bbox(surface);
+    ExactPoint min_point(bbox.xmin(), bbox.ymin(), bbox.zmin());
+    ExactPoint max_point(bbox.xmax(), bbox.ymax(), bbox.zmax());
+
+    aabb_points = {
+        min_point,
+        ExactPoint(max_point.x(), min_point.y(), min_point.z()),
+        ExactPoint(max_point.x(), max_point.y(), min_point.z()),
+        ExactPoint(min_point.x(), max_point.y(), min_point.z()),
+        ExactPoint(min_point.x(), min_point.y(), max_point.z()),
+        ExactPoint(max_point.x(), min_point.y(), max_point.z()),
+        max_point,
+        ExactPoint(min_point.x(), max_point.y(), max_point.z())
+    };
+
+    std::array<ExactVector, 3> small_voxel_strides = {
+        (aabb_points[1] - aabb_points[0]) / static_cast<double>(numVoxels[0]),
+        (aabb_points[3] - aabb_points[0]) / static_cast<double>(numVoxels[1]),
+        (aabb_points[4] - aabb_points[0]) / static_cast<double>(numVoxels[2])
+    };
+     std::cout<<"AABB is done"<<std::endl;
+     
+    //calculate the extended obb,the offset should be se_scale number of tight voxels
+    ExactVector new_stride_x=small_voxel_strides[0]*(numVoxels[0]+8.5)/numVoxels[0];
+    ExactVector new_stride_y=small_voxel_strides[1]*(numVoxels[1]+8.5)/numVoxels[1];
+    ExactVector new_stride_z=small_voxel_strides[2]*(numVoxels[2]+8.5)/numVoxels[2];
+
+    voxel_strides={new_stride_x,new_stride_y,new_stride_z};
+    
+    //calculate the new min_point as global min point
+	ExactPoint new_min_point= aabb_points[0]-(small_voxel_strides[0]*4.25)
+	                                             -(small_voxel_strides[1]*4.25)
+												 -(small_voxel_strides[2]*4.25);
+	 global_min_point=new_min_point;
+
+	//start voxelization
+	auto numVoxel = numVoxels[0] * numVoxels[1] * numVoxels[2];
+    bool interior = false;
+
+	 std::vector<uint8_t> voxels_marking(numVoxel, 0); // either outside 0, surface 1 or interior 2
+    Tree tree(faces(poly).first, faces(poly).second, poly);
+	tree.accelerate_distance_queries();
+
+	Point_inside inside_tester(tree);
+
+    #pragma omp parallel for schedule(dynamic)
+     for (unsigned int i = 0; i < numVoxel; ++i){
+        Exact_Polyhedron voxel = Exact_Polyhedron();
+        bool new_scanline;
+
+        calc_voxel_from_idx_tets(i, numVoxels, new_min_point, voxel_strides, voxel, &new_scanline);
+      
+       //check if inside
+       bool inside = true;
+
+        for (auto vert : voxel.vertex_handles())
+        {
+            if (inside_tester(vert->point()) != CGAL::ON_BOUNDED_SIDE)
+            {
+                inside = false;
+                break;
+            }
+        }
+     CGAL::Iso_cuboid_3<Exact_Kernel> voxel_bbox = CGAL::bounding_box(voxel.points().begin(), voxel.points().end());
+     bool intersects = tree.any_intersected_primitive(voxel_bbox).has_value();  
+
+      if (intersects|| inside){
+            #pragma omp critical
+            {
+            grid[i/(numVoxels[1]*numVoxels[2])][(i/numVoxels[2])%numVoxels[1]][i%numVoxels[2]]=true;
+            voxels_marking[i]=inside ? 2 : 1;
+           }
+      }
+
+
+     }
+
+	 	 std::cout<<"parallel part is done"<<std::endl;
+
+
+				  }
+
+//tri_quad cage
+double compute_angle_between_faces(const SurMesh& mesh, FaceIndex f1, FaceIndex f2) {
+    Surface_Vector n1 = PMP::compute_face_normal(f1, mesh);
+    Surface_Vector n2 = PMP::compute_face_normal(f2, mesh);
+
+	 double dot_product = n1 * n2;  
+    double angle_rad = std::acos(std::clamp(dot_product, -1.0, 1.0));  
+    return CGAL::to_double(angle_rad) * (180.0 / CGAL_PI);  
+}
+
+
+bool find_best_merge(SurMesh& mesh, FaceIndex f, double angle_threshold, std::unordered_set<FaceIndex>& merged_faces) {
+    double min_angle = angle_threshold; 
+    HalfedgeIndex best_halfedge;
+    FaceIndex best_neighbor = SurMesh::null_face();
+
+    for (HalfedgeIndex h : CGAL::halfedges_around_face(halfedge(f, mesh), mesh)) {
+        FaceIndex neighbor = CGAL::face(opposite(h, mesh), mesh);
+        if (neighbor == SurMesh::null_face() || merged_faces.count(neighbor)) continue; 
+
+        double angle = compute_angle_between_faces(mesh, f, neighbor);
+        if (angle < min_angle) {
+            min_angle = angle;
+            best_halfedge = h;
+            best_neighbor = neighbor;
+        }
+    }
+
+    if (best_neighbor != SurMesh::null_face()) {
+        CGAL::Euler::join_face(best_halfedge, mesh); 
+        merged_faces.insert(f);
+        merged_faces.insert(best_neighbor);
+        return true;
+    }
+    return false;
+}
+
+
+
+
+void convert_to_tri_quad_meshT(SurMesh& mesh, double angle_threshold=10.0) {
+    std::unordered_set<FaceIndex> merged_faces;
+    std::vector<FaceIndex> faces_list(faces(mesh).begin(), faces(mesh).end());
+
+    for (FaceIndex f : faces_list) {
+        if (merged_faces.count(f)) continue; 
+        find_best_merge(mesh, f, angle_threshold, merged_faces);
+    }
 }
 
 void GenerateCageFromMeshOperation::Execute(){
@@ -938,46 +1128,121 @@ void GenerateCageFromMeshOperation::Execute(){
  std::string filename = _params._meshfilepath.string();
  std::string outputfilename=_params._cagefilepath.string();
 
+ int smooth=_params._smoothIterations;
+ int cageFace=_params._targetNumFaces;
+bool isTriQuad=_params._isTriQuad;
+
 //extract input model name
 std::string obj=filename.substr(filename.find_last_of('/')+1,filename.find_last_of('.')-1);
 std::string filepath=filename.substr(0,filename.find_last_of('/')+1);
 std::string intermediate_path=filepath+obj+"_interm.obj";
 
-VOXEL_GRID& e_grid = _params._closingResult;
+//voxel number
+    std::array<unsigned int, 3> numVoxels = { 32u, 32u, 32u };
+ Grid3D fineGrid=initializeGrid(numVoxels[0],numVoxels[1],numVoxels[2]);
+ std::array<ExactPoint, 8> obb_points;
+std::array<ExactVector, 3> voxel_strides;
 
- // generate voxel grid and mipmap
-	if(e_grid.empty())
-	{
-		MIPMAP_TYPE mipmap = voxelize_and_mipmap(filename);
+const std::string off_filename=filepath+"voxelization.off";
+const std::string grid_filename=filepath+"grid.obj";
+const std::string dilation_obj_cube_filename=filepath+"dialation_cube.obj";
+const std::string erosion_obj_filename=filepath+"erosion.obj";
+const std::string meshing_off_filename=filepath+"meshing4.off";
+std::string tri_quad_intermediate_path=filepath+"tri_quad_inter.obj";
+
+
+
+	int se_scale=3;
+	const int hierarchyLevels=6;
+   auto start_voxelization = std::chrono::high_resolution_clock::now(); 
+   voxelizationA(filename,fineGrid,off_filename,numVoxels,obb_points,voxel_strides,se_scale);
+   	auto end_voxelization = std::chrono::high_resolution_clock::now(); 
+    std::chrono::duration<double> elapsed_voxelization = end_voxelization - start_voxelization;
+    	std::cout<<"voxelization is done, elapse time: "<< elapsed_voxelization.count()<<" second "<<std::endl;
+
+   std::vector<std::array<int,3>> offsets=generate_sphere_offsets(se_scale-2);
+
+   	 //wirte the 3D grid into the obj file
+     writeGridIntoObj(fineGrid,grid_filename);
+
+	 //build the mipmaptree for dilation
+        auto start_dilation = std::chrono::high_resolution_clock::now(); 
+
+	   MipmapTree mipmap_dilate = buildHeirarchy(fineGrid,hierarchyLevels);
+
+      //do the dilation
+	  
+	    Grid3D dilation=parallelDilationA(fineGrid,mipmap_dilate,se_scale);
+      auto end_dilation = std::chrono::high_resolution_clock::now(); 
+    std::chrono::duration<double> elapsed_dilation = end_dilation - start_dilation;
+    std::cout<<"dilation is done ,elapse time: "<<elapsed_dilation.count()<<" second "<<std::endl;
+ 
+      writeGridIntoObj(dilation,dilation_obj_cube_filename);
+
+	  	//extract the contour of the dilation
+		Grid3D contour=extract_contour(dilation);
+
+		//build the mipmap for eroion
+        auto start_erosion = std::chrono::high_resolution_clock::now(); 
+
+		MipmapTree mipmap_erose=buildHeirarchy(contour,hierarchyLevels);
+
+       //do the erosion
 		
-		// dilation
-		VOXEL_GRID d_grid = executeDilation(mipmap);
 
-		// extract contour and generate mipmap of the contour
-		//std::cout << "drawing done. start contour extraction\n";
-		VOXEL_GRID contour = extract_contour(d_grid);
+		Grid3D erosion=spaciallyErosionT(dilation,fineGrid,mipmap_erose,se_scale-1,offsets);
+        auto end_erosion = std::chrono::high_resolution_clock::now(); 
+        std::chrono::duration<double> elapsed_erosion = end_erosion - start_erosion;
 
-		//std::cout << "contour extraction done\n";
-		MIPMAP_TYPE contour_pyramid = generate_mipmap(contour);
+		std::cout<<"erosion is done, elapse time: "<<elapsed_erosion.count()<< "second "<<std::endl;
 
-		// erosion
-		e_grid.resize(d_grid.size());
-		e_grid.assign(d_grid.begin(), d_grid.end());
-		execute_erosion(contour_pyramid, e_grid, mipmap[0]);
-		//std::cout << "erosion done, start surface extraction\n";
-	}
-	// Extract the surface from the closed grid
-	std::array<ExactVector, 3> voxel_strides = { ExactVector(base_cellsize, 0, 0),
-	ExactVector(0, base_cellsize, 0), ExactVector(0, 0, base_cellsize) };
-	ExactMesh extracted_surface = extract_surface_from_voxels(e_grid, voxel_strides, global_min_point);
-    CGAL::write_off(intermediate_path.c_str(), extracted_surface);
+		//write the erosion(grid) into obj file
+		writeGridIntoObj(erosion,erosion_obj_filename);
 
-     // Simplification
-	MyMesh final_mesh;
-	tri::io::ImporterOFF<MyMesh>::Open(final_mesh, intermediate_path.c_str());
-	decimation(final_mesh, _params._smoothIterations, _params._targetNumFaces);
-	std::string output_path = filepath + obj + "_cage.obj";
+       //meshing
+	    auto start_meshing = std::chrono::high_resolution_clock::now(); 
+		extract_surface_from_voxels(erosion,voxel_strides,global_min_point,meshing_off_filename);
 
-	tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,outputfilename.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
+       //decimation
+		MyMesh final_mesh;
+		tri::io::ImporterOFF<MyMesh>::Open(final_mesh,meshing_off_filename.c_str());
+		decimation(final_mesh,smooth,cageFace);
+      auto end_meshing = std::chrono::high_resolution_clock::now(); 
+        std::chrono::duration<double> elapsed_meshing = end_meshing - start_meshing;
+       	std::cout<<"meshing is done, elapse time: "<<elapsed_meshing.count()<< "second "<<std::endl;
+
+      if(!isTriQuad){
+
+        tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,outputfilename.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
+
+      }
+      else{
+        tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,tri_quad_intermediate_path.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
+         
+		   SurMesh input_mesh;
+		
+    if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(tri_quad_intermediate_path, input_mesh) || input_mesh.is_empty())
+    {
+        std::cerr << "Invalid input file.\n";
+        return ;
+    }
+
+	convert_to_tri_quad_meshT(input_mesh);
+        std::ofstream out(outputfilename);
+    if (!out) {
+        std::cerr << "Error: Cannot open output.obj for writing!" << std::endl;
+        return ;
+    }
+
+    if (!CGAL::IO::write_OBJ(out, input_mesh)) {
+        std::cerr << "Error: Failed to write OBJ file!" << std::endl;
+        return ;
+    }
+      }
+      
+    
+
+        
 	
+
 }
