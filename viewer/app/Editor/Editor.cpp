@@ -640,9 +640,10 @@ void Editor::OnProjectOptionUpdated()
 			_projectModel->_scalingFactor,
 			_projectModel->_smoothIterations,
 			_projectModel->_targetNumFaces,
-			_projectModel->_closingResult,
-			_projectModel->_isTriQuad
-			
+      _projectModel->_closingResult,
+	    _projectModel->_isTriQuad
+		
+
 		);
 	}
 	OnNewProjectCreated();
