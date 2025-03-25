@@ -179,6 +179,20 @@ void ProjectSettingsPanel::Layout()
 				ImGui::InputInt("##CageFaces", &_modifiedProjectModel._targetNumFaces, 1,10 , ImGuiInputTextFlags_NoHorizontalScroll);
 			}
 
+          ImGui::TableNextRow();
+			{
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextEx("Tri_Quad Cage");
+				ImGui::SameLine();
+				UIHelpers::HelpMarker("Generated cage is tri_quad .");
+
+				ImGui::TableSetColumnIndex(1);
+				UIHelpers::SetRightAligned(25.0f);
+				ImGui::Checkbox("##IsTriQuad", &_modifiedProjectModel._isTriQuad);
+				ImGui::SameLine();
+			}
+         
+       
           const auto hasNoMesh1 = !_modifiedProjectModel._meshFilepath.has_value();
 			ImGui::TableNextRow();
 			{
@@ -511,7 +525,9 @@ const auto meshOperationSystem = _meshOperationSystem.lock();
 		_modifiedProjectModel._scalingFactor,
 		_modifiedProjectModel._smoothIterations,
 		_modifiedProjectModel._targetNumFaces,
-		_modifiedProjectModel._closingResult
+		_modifiedProjectModel._closingResult,
+		_modifiedProjectModel._isTriQuad
+		
 	);
 
     std::ifstream input(outputCageFile);

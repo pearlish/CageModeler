@@ -7,17 +7,29 @@ struct GenerateCageFromMeshOperationParams{
 
 GenerateCageFromMeshOperationParams(std::filesystem::path meshFilepath,
                                std::filesystem::path cageFilepath, 
-                               const int scale):
+                               const int scale,
+                               const int smoothIterations,
+                               const int targetNumFaces,
+                               std::vector<bool>& closingResult,
+                               bool isTriQuad
+                               ):
 
                                _meshfilepath(std::move(meshFilepath)),
                                _cagefilepath(std::move(cageFilepath)),
-                               _scale(scale)
+                               _scale(scale),
+                               _smoothIterations(smoothIterations),
+                               _targetNumFaces(targetNumFaces),
+                               _closingResult(closingResult),
+                               _isTriQuad(isTriQuad)
                                {}
 
 std::filesystem::path _meshfilepath;
 std::filesystem::path _cagefilepath;
 int _scale;
-
+int _smoothIterations;
+int _targetNumFaces;
+std::vector<bool>& _closingResult;
+bool _isTriQuad;
 
 };
 
