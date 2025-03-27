@@ -4,9 +4,9 @@
 #include <Mesh/Operations/MeshGenerateCageOperation.h>
 
 ProjectSettingsPanel::ProjectSettingsPanel(const std::shared_ptr<ProjectModelData>& model,
-										   const std::shared_ptr<MeshOperationSystem>& meshOperationSystem,
-										   std::function<void ()> cancelDelegate,
-										   std::function<void()> projectSettingsApplied)
+	const std::shared_ptr<MeshOperationSystem>& meshOperationSystem,
+	std::function<void()> cancelDelegate,
+	std::function<void()> projectSettingsApplied)
 	: _meshOperationSystem(meshOperationSystem)
 	, _projectSettingsCancelled(std::move(cancelDelegate))
 	, _projectSettingsApplied(std::move(projectSettingsApplied))
@@ -200,25 +200,37 @@ void ProjectSettingsPanel::Layout()
 					_modifiedProjectModel._smoothIterations = 0;
 				else if (_modifiedProjectModel._smoothIterations > 20)
 					_modifiedProjectModel._smoothIterations = 20;
-			
+
+			}
+			ImGui::TableNextRow();
+			{
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextEx("Tri_Quad Cage");
+				ImGui::SameLine();
+				UIHelpers::HelpMarker("Generated cage is tri_quad .");
+
+				ImGui::TableSetColumnIndex(1);
+				UIHelpers::SetRightAligned(25.0f);
+				ImGui::Checkbox("##IsTriQuad", &_modifiedProjectModel._isTriQuad);
+				ImGui::SameLine();
 			}
 
-          const auto hasNoMesh1 = !_modifiedProjectModel._meshFilepath.has_value();
+			const auto hasNoMesh1 = !_modifiedProjectModel._meshFilepath.has_value();
 			ImGui::TableNextRow();
 			{
 				ImGui::TableSetColumnIndex(0);
 				ImGui::TextEx("Cage File");
 
-        
-		//generate the cage
-		ImGui::BeginDisabled(hasNoMesh1 );
-		{
-			if (ImGui::Button("Generate Cage"))
-			{
-				_modifiedProjectModel._cageFilepath = GenerateCageFromMesh();
-			}
-		}
-		ImGui::EndDisabled();
+
+				//generate the cage
+				ImGui::BeginDisabled(hasNoMesh1);
+				{
+					if (ImGui::Button("Generate Cage"))
+					{
+						_modifiedProjectModel._cageFilepath = GenerateCageFromMesh();
+					}
+				}
+				ImGui::EndDisabled();
 
 
 				ImGui::TableSetColumnIndex(1);
@@ -515,20 +527,25 @@ void ProjectSettingsPanel::Dismiss()
 }
 
 
-std::string ProjectSettingsPanel::GenerateCageFromMesh(){
+std::string ProjectSettingsPanel::GenerateCageFromMesh() {
 
 
-_modifiedProjectModel._closingResult.clear();
-const auto meshOperationSystem = _meshOperationSystem.lock();
-		if (meshOperationSystem == nullptr)
-		{
-			return " ";
-		}
-			
-	std::filesystem::path currentpath=__FILE__;
-	std::filesystem::path upperpath=currentpath.parent_path().parent_path().parent_path().parent_path();
-	std::string outputCageFile=upperpath.string() + "/models/cage.obj";
-	 
+	_modifiedProjectModel._closingResult.clear();
+	const auto meshOperationSystem = _meshOperationSystem.lock();
+	if (meshOperationSystem == nullptr)
+	{
+		return " ";
+	}
+
+	std::filesystem::path currentpath = __FILE__;
+	std::filesystem::path upperpath = currentpath.parent_path().parent_path().parent_path().parent_path();
+	std::string outputCageFile = upperpath.string();
+#ifdef _WIN32
+	outputCageFile += "\\models\\autoCage.obj";
+#else
+	outputCageFile += "/models/autoCage.obj";
+#endif
+
 	meshOperationSystem->ExecuteOperation<GenerateCageFromMeshOperation>(
 		_modifiedProjectModel._meshFilepath.value().string(),
 		outputCageFile,
@@ -539,9 +556,9 @@ const auto meshOperationSystem = _meshOperationSystem.lock();
 		_modifiedProjectModel._voxelResolution
 	);
 
-    std::ifstream input(outputCageFile);
-     
-	if(!input){
+	std::ifstream input(outputCageFile);
+
+	if (!input) {
 
 		//handle cage generatioin failed
 		ImGui::OpenPopup("Cage Generation Failed!");

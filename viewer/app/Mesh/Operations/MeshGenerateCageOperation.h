@@ -12,7 +12,8 @@ struct GenerateCageFromMeshOperationParams {
 		const int smoothIterations,
 		const int targetNumFaces,
 		VOXEL_GRID& closingResult,
-		const int voxelResolution
+		const int voxelResolution,
+		bool isTriQuad
 	) :
 		_meshfilepath(std::move(meshFilepath)),
 		_cagefilepath(std::move(cageFilepath)),
@@ -21,7 +22,9 @@ struct GenerateCageFromMeshOperationParams {
 		_targetNumFaces(targetNumFaces),
 		_closingResult(closingResult),
 		_voxelResolution(voxelResolution)
-	{}
+	{
+		_isTriQuad = isTriQuad;
+	}
 
 	std::filesystem::path _meshfilepath;
 	std::filesystem::path _cagefilepath;
@@ -30,6 +33,7 @@ struct GenerateCageFromMeshOperationParams {
 	int _targetNumFaces;
 	VOXEL_GRID& _closingResult;
 	int _voxelResolution;
+	bool _isTriQuad;
 
 };
 

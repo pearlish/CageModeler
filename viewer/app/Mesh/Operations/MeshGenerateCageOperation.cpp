@@ -41,19 +41,27 @@ std::array<float, 3> bbox_min;
 
 void GenerateCageFromMeshOperation::Execute() {
 	
-	int cage_start = clock();
-
 	std::string filename = _params._meshfilepath.string();
 	std::string outputfilename = _params._cagefilepath.string();
 
 	//extract input model name
-	std::string obj = filename.substr(filename.find_last_of('\\') + 1, filename.find_last_of('.') - 1);
-	std::string filepath = filename.substr(0, filename.find_last_of('\\') + 1);
-	std::string intermediate_path = filepath + obj + "_interm.obj";
-	
+	std::string obj=_params._meshfilepath.stem().string();
+	std::string filepath= _params._meshfilepath.parent_path().string();
+
+	#ifdef _WIN32
+	filepath+="\\";
+	#else
+	filepath+="/";
+	#endif
+	  
+	bool isTriQuad=_params._isTriQuad;
+	const std::string intermediate_path = filepath + obj + "_interm.obj";
+	std::string tri_quad_intermediate_path = filepath + obj + "_tri_quad_interm.obj";
+
 	VOXEL_GRID& e_grid = _params._closingResult;
 	int resolution = pow(2, _params._voxelResolution);
 	std::cout << "Generating Cage for " << obj << ", resol: " << resolution << std::endl;
+	int cage_start = clock();
 
 	if (e_grid.size() != std::pow(resolution, 3))
 	{	
@@ -81,8 +89,33 @@ void GenerateCageFromMeshOperation::Execute() {
 	tri::io::ImporterOFF<MyMesh>::Open(final_mesh, intermediate_path.c_str());
 	remesher.Decimate(final_mesh, _params._smoothIterations, _params._targetNumFaces);
 	
-	tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, outputfilename.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
+	if (!isTriQuad) {
+		tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, outputfilename.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
 
+	}
+	else {
+		tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, tri_quad_intermediate_path.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
+
+		SurMesh input_mesh;
+
+		if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(tri_quad_intermediate_path, input_mesh) || input_mesh.is_empty())
+		{
+			std::cerr << "Invalid input file.\n";
+			return;
+		}
+
+		remesher.ConvertToTriQuadMesh(input_mesh);
+		std::ofstream out(outputfilename);
+		if (!out) {
+			std::cerr << "Error: Cannot open output.obj for writing!" << std::endl;
+			return;
+		}
+
+		if (!CGAL::IO::write_OBJ(out, input_mesh)) {
+			std::cerr << "Error: Failed to write OBJ file!" << std::endl;
+			return;
+		}
+	}
 	int cage_end = clock();
 	printf("[Cage Generation Done] elapsed time: %5.3f sec\n", float(cage_end - cage_start) / CLOCKS_PER_SEC);
 }
