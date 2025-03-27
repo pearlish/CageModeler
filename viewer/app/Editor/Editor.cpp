@@ -628,7 +628,7 @@ void Editor::OnNewProjectCreated()
 void Editor::OnProjectOptionUpdated()
 {
 
-	if(!_projectModel->_closingResult.empty()){
+//	if(!_projectModel->_closingResult.empty()){
 
 		std::filesystem::path currentpath=__FILE__;
 		std::filesystem::path upperpath=currentpath.parent_path().parent_path().parent_path().parent_path();
@@ -640,12 +640,11 @@ void Editor::OnProjectOptionUpdated()
 			_projectModel->_scalingFactor,
 			_projectModel->_smoothIterations,
 			_projectModel->_targetNumFaces,
-      _projectModel->_closingResult,
-	    _projectModel->_isTriQuad
-		
-
+			_projectModel->_closingResult,
+			_projectModel->_isTriQuad
+			
 		);
-	}
+//	}
 	OnNewProjectCreated();
 }
 
