@@ -623,91 +623,6 @@ return result;
 
 
 
-bool check_intersect_erosion(const std::array<int,3>& node, int level,
-                              const std::array<int,3>& voxelp, int seSize,
-                              const std::array<int,3>& gridSizes,
-                              const std::vector<std::array<int,3>>& offsets) {
-
-    bool result = false;
-    int nodeBoxSize = 1 << level;
-    int nodeBoxMinX = node[0] * nodeBoxSize, nodeBoxMaxX = (node[0] + 1) * nodeBoxSize;
-    int nodeBoxMinY = node[1] * nodeBoxSize, nodeBoxMaxY = (node[1] + 1) * nodeBoxSize;
-    int nodeBoxMinZ = node[2] * nodeBoxSize, nodeBoxMaxZ = (node[2] + 1) * nodeBoxSize;
-
-    std::vector<uint8_t> dilated_voxels(gridSizes[0] * gridSizes[1] * gridSizes[2], 0);
-
-    #pragma omp parallel for
-    for (int x = nodeBoxMinX; x < nodeBoxMaxX; ++x) {
-        for (int y = nodeBoxMinY; y < nodeBoxMaxY; ++y) {
-            for (int z = nodeBoxMinZ; z < nodeBoxMaxZ; ++z) {
-                int baseIdx = getIndex(x, y, z, gridSizes);  
-                for (const auto& offset : offsets) {
-                    int nx = x + offset[0];
-                    int ny = y + offset[1];
-                    int nz = z + offset[2];
-
-                    if (isValid(nx, ny, nz, gridSizes)) {
-                        int idx = getIndex(nx, ny, nz, gridSizes);
-                        dilated_voxels[idx] = 1;
-                    }
-                }
-            }
-        }
-    }
-
-    
-    for (int x = voxelp[0]; x <= voxelp[0] + 1; ++x) {
-        for (int y = voxelp[1]; y <= voxelp[1] + 1; ++y) {
-            for (int z = voxelp[2]; z <= voxelp[2] + 1; ++z) {
-                int idx = getIndex(x, y, z, gridSizes);
-                if (dilated_voxels[idx]) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-
-
-bool check_intersect_erosion(const std::array<int,3>& node, int level,const std::array<int,3>& voxelp,int seSize,const std::array<int,3> gridSizes){
-
-//the region of dilated subnode box 
-	//the region of the node box
-	int nodeBoxSize=1<<level;
-	int nodeBoxMinX=node[0] * nodeBoxSize, nodeBoxMaxX=(node[0]+1) * nodeBoxSize;
-	int nodeBoxMinY=node[1] * nodeBoxSize, nodeBoxMaxY=(node[1]+1) * nodeBoxSize;
-	int nodeBoxMinZ=node[2] * nodeBoxSize, nodeBoxMaxZ=(node[2]+1) * nodeBoxSize;
-
-	//the offset created by sphere SE
-	int newBoxMinX=std::max(0,nodeBoxMinX-seSize);
-	int newBoxMaxX=std::min(nodeBoxMaxX+seSize,gridSizes[0]);
-	int newBoxMinY=std::max(0,nodeBoxMinY-seSize);
-	int newBoxMaxY=std::min(nodeBoxMaxY+seSize,gridSizes[1]);
-	int newBoxMinZ=std::max(0,nodeBoxMinZ-seSize);
-	int newBoxMaxZ=std::min(nodeBoxMaxZ+seSize,gridSizes[2]);
-
-
-   //the region of checked voxel box
-   int voxelMinX=voxelp[0];
-   int voxelMaxX=voxelp[0]+1;
-   int voxelMinY=voxelp[1];
-   int voxelMaxY=voxelp[1]+1;
-   int voxelMinZ=voxelp[2];
-   int voxelMaxZ=voxelp[2]+1;
-
-   //check the overlap
-   bool isOverlapX= std::max(newBoxMinX,voxelMinX)<std::min(newBoxMaxX,voxelMaxX);
-   bool isOverlapY= std::max(newBoxMinY,voxelMinY)<std::min(newBoxMaxY,voxelMaxY);
-   bool isOverlapZ= std::max(newBoxMinZ,voxelMinZ)<std::min(newBoxMaxZ,voxelMaxZ);
-
-return isOverlapX && isOverlapY && isOverlapZ;
-
-}
-
-
 
 //test erosion
 struct Pair {
@@ -1014,16 +929,16 @@ std::cout << "Loading surface\n";
      std::cout<<"AABB is done"<<std::endl;
      
     //calculate the extended obb,the offset should be se_scale number of tight voxels
-    ExactVector new_stride_x=small_voxel_strides[0]*(numVoxels[0]+8.5)/numVoxels[0];
-    ExactVector new_stride_y=small_voxel_strides[1]*(numVoxels[1]+8.5)/numVoxels[1];
-    ExactVector new_stride_z=small_voxel_strides[2]*(numVoxels[2]+8.5)/numVoxels[2];
+    ExactVector new_stride_x=small_voxel_strides[0]*(numVoxels[0]+8.8)/numVoxels[0];
+    ExactVector new_stride_y=small_voxel_strides[1]*(numVoxels[1]+8.8)/numVoxels[1];
+    ExactVector new_stride_z=small_voxel_strides[2]*(numVoxels[2]+8.8)/numVoxels[2];
 
     voxel_strides={new_stride_x,new_stride_y,new_stride_z};
     
     //calculate the new min_point as global min point
-	ExactPoint new_min_point= aabb_points[0]-(small_voxel_strides[0]*4.25)
-	                                             -(small_voxel_strides[1]*4.25)
-												 -(small_voxel_strides[2]*4.25);
+	ExactPoint new_min_point= aabb_points[0]-(small_voxel_strides[0]*4.4)
+	                                             -(small_voxel_strides[1]*4.4)
+												 -(small_voxel_strides[2]*4.4);
 	 global_min_point=new_min_point;
 
 	//start voxelization
@@ -1138,7 +1053,7 @@ std::string filepath=filename.substr(0,filename.find_last_of('/')+1);
 std::string intermediate_path=filepath+obj+"_interm.obj";
 
 //voxel number
-    std::array<unsigned int, 3> numVoxels = { 32u, 32u, 32u };
+    std::array<unsigned int, 3> numVoxels = { 64u, 64u, 64u };
  Grid3D fineGrid=initializeGrid(numVoxels[0],numVoxels[1],numVoxels[2]);
  std::array<ExactPoint, 8> obb_points;
 std::array<ExactVector, 3> voxel_strides;
@@ -1152,15 +1067,15 @@ std::string tri_quad_intermediate_path=filepath+"tri_quad_inter.obj";
 
 
 
-	int se_scale=3;
-	const int hierarchyLevels=6;
+	int se_scale=4;
+	const int hierarchyLevels=7;
    auto start_voxelization = std::chrono::high_resolution_clock::now(); 
    voxelizationA(filename,fineGrid,off_filename,numVoxels,obb_points,voxel_strides,se_scale);
    	auto end_voxelization = std::chrono::high_resolution_clock::now(); 
     std::chrono::duration<double> elapsed_voxelization = end_voxelization - start_voxelization;
     	std::cout<<"voxelization is done, elapse time: "<< elapsed_voxelization.count()<<" second "<<std::endl;
 
-   std::vector<std::array<int,3>> offsets=generate_sphere_offsets(se_scale-2);
+   std::vector<std::array<int,3>> offsets=generate_sphere_offsets(se_scale-3);
 
    	 //wirte the 3D grid into the obj file
      writeGridIntoObj(fineGrid,grid_filename);

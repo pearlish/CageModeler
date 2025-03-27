@@ -26,7 +26,7 @@ IF (APPLE)
 endif ()
 
 #OpenMP
-#include_directories(/opt/homebrew/opt/libomp/include)
+include_directories(/opt/homebrew/opt/libomp/include)
 
 # Set the startup project for the "play" button in MSVC.
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
@@ -150,7 +150,7 @@ if (WIN32)
         COMMAND_EXPAND_LISTS)
 endif()
 
-find_package(OpenMP REQUIRED)
+#find_package(OpenMP REQUIRED)
 
 # Link the libraries against the project.
 target_link_libraries(
@@ -165,7 +165,8 @@ target_link_libraries(
         nfd
         SDL3::SDL3
         OpenMeshCore
-        OpenMP::OpenMP_CXX)
+        /opt/homebrew/opt/libomp/lib/libomp.dylib
+        )
 
 # On Windows will enable SDL2 to recognize high DPI monitors.
 if (WIN32)
