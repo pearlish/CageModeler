@@ -30,6 +30,7 @@ struct ProjectModelData
 		_smoothIterations = other._smoothIterations;
 		_targetNumFaces = other._targetNumFaces;
 		_closingResult = other._closingResult;
+		_isTriQuad=other._isTriQuad;
 		
 	}
 
@@ -78,6 +79,8 @@ struct ProjectModelData
 		swap(lhs._smoothIterations, rhs._smoothIterations);
 		swap(lhs._targetNumFaces, rhs._targetNumFaces);
 		swap(lhs._closingResult, rhs._closingResult);
+		swap(lhs._isTriQuad, rhs._isTriQuad);
+		
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -119,8 +122,9 @@ struct ProjectModelData
 			lhs._findOffset == rhs._findOffset &&
 			lhs._noOffset == rhs._noOffset &&
 			lhs._smoothIterations == rhs._smoothIterations &&
-			lhs._targetNumFaces == rhs._targetNumFaces;
-			lhs._closingResult == rhs._closingResult;
+			lhs._targetNumFaces == rhs._targetNumFaces &&
+			lhs._closingResult == rhs._closingResult &&
+			lhs._isTriQuad== rhs._isTriQuad;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -176,6 +180,7 @@ struct ProjectModelData
 
 	int32_t _smoothIterations = 3;
 	int32_t _targetNumFaces = 400;
+	bool _isTriQuad=false;
 
 	std::vector<bool> _closingResult;
 

@@ -10,6 +10,7 @@
 #include <bitset>
 #include <omp.h>
 #include <ctime>
+#include <filesystem>
 #define CGAL_EIGEN3_ENABLED
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -70,9 +71,18 @@ typedef Exact_Polyhedron::Face_handle Face;
 typedef std::vector<bool> VOXEL_GRID;
 typedef std::vector<VOXEL_GRID>	MIPMAP_TYPE;
 
+typedef CGAL::Simple_cartesian<double>                                  Kernel;
+typedef Kernel::Point_3                                                 Surface_Point;
+typedef Kernel::Vector_3                                                 Surface_Vector;
+
+typedef CGAL::Surface_mesh<Surface_Point>                                SurMesh;
+typedef boost::graph_traits<SurMesh>::face_descriptor                    FaceIndex;
+typedef boost::graph_traits<SurMesh>::halfedge_descriptor                HalfedgeIndex;
+typedef boost::graph_traits<SurMesh>::vertex_descriptor                  VertexIndex;
+
 namespace PMP = CGAL::Polygon_mesh_processing;
 //namespace SMS = CGAL::Surface_mesh_simplification;
-
+namespace fd=std::filesystem;
 
 // save diagnostic state
 #pragma GCC diagnostic push 
@@ -105,7 +115,7 @@ namespace PMP = CGAL::Polygon_mesh_processing;
 #include <vcg/complex/algorithms/local_optimization/tri_edge_collapse_quadric.h>
 #include <vcg/complex/algorithms/clean.h>
 #include <vcg/complex/algorithms/smooth.h>
-
+#include <CGAL/boost/graph/IO/polygon_mesh_io.h>
 //#include <vcg/export_off.h> 
 
 using namespace vcg;
@@ -157,7 +167,7 @@ public:
 	inline MyTriEdgeCollapse(const VertexPair& p, int i, BaseParameterClass* pp) :TECQ(p, i, pp) {}
 };
 
-int BASE_RESOLUTION = 64;
+ unsigned int BASE_RESOLUTION = 64;
 float SE_SIZE = 4.f;
 typedef struct {
 	int level;
@@ -920,11 +930,69 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 
 }
 
+
+
+
+//Tri-Quad Algorithm
+
+
+
+double compute_angle_between_faces(const SurMesh& mesh, FaceIndex f1, FaceIndex f2) {
+    Surface_Vector n1 = PMP::compute_face_normal(f1, mesh);
+    Surface_Vector n2 = PMP::compute_face_normal(f2, mesh);
+
+	 double dot_product = n1 * n2;  
+    double angle_rad = std::acos(std::clamp(dot_product, -1.0, 1.0));  
+    return CGAL::to_double(angle_rad) * (180.0 / CGAL_PI);  
+}
+
+
+bool find_best_merge(SurMesh& mesh, FaceIndex f, double angle_threshold, std::unordered_set<FaceIndex>& merged_faces) {
+    double min_angle = angle_threshold; 
+    HalfedgeIndex best_halfedge;
+    FaceIndex best_neighbor = SurMesh::null_face();
+
+    for (HalfedgeIndex h : CGAL::halfedges_around_face(halfedge(f, mesh), mesh)) {
+        FaceIndex neighbor = CGAL::face(opposite(h, mesh), mesh);
+        if (neighbor == SurMesh::null_face() || merged_faces.count(neighbor)) continue; 
+
+        double angle = compute_angle_between_faces(mesh, f, neighbor);
+        if (angle < min_angle) {
+            min_angle = angle;
+            best_halfedge = h;
+            best_neighbor = neighbor;
+        }
+    }
+
+    if (best_neighbor != SurMesh::null_face()) {
+        CGAL::Euler::join_face(best_halfedge, mesh); 
+        merged_faces.insert(f);
+        merged_faces.insert(best_neighbor);
+        return true;
+    }
+    return false;
+}
+
+
+
+
+void convert_to_tri_quad_meshT(SurMesh& mesh, double angle_threshold=10.0) {
+    std::unordered_set<FaceIndex> merged_faces;
+    std::vector<FaceIndex> faces_list(faces(mesh).begin(), faces(mesh).end());
+
+    for (FaceIndex f : faces_list) {
+        if (merged_faces.count(f)) continue; 
+        find_best_merge(mesh, f, angle_threshold, merged_faces);
+    }
+}
+
+
+
 void GenerateCageFromMeshOperation::Execute() {
 	std::cout << "Enter resolution: ";
 	std::cin >> BASE_RESOLUTION;
 
-	SE_SIZE = BASE_RESOLUTION / 2.0;
+	SE_SIZE = BASE_RESOLUTION / 16.0;
 	erode_scale = 0.4;
 
 	//int cage_start = clock();
@@ -933,9 +1001,22 @@ void GenerateCageFromMeshOperation::Execute() {
 	std::string outputfilename = _params._cagefilepath.string();
 
 	//extract input model name
-	std::string obj = filename.substr(filename.find_last_of('\\') + 1, filename.find_last_of('.') - 1);
-	std::string filepath = filename.substr(0, filename.find_last_of('\\') + 1);
-	std::string intermediate_path = filepath + obj + "_interm.obj";
+
+    std::string obj=_params._meshfilepath.stem().string();
+	std::string filepath= _params._meshfilepath.parent_path().string();
+
+	#ifdef _WIN32
+	filepath+="\\";
+	#else
+	filepath+="/";
+	#endif
+	  
+   bool isTriQuad=_params._isTriQuad;
+	// std::string obj = filename.substr(filename.find_last_of('\\') + 1, filename.find_last_of('.') - 1);
+	// std::string filepath = filename.substr(0, filename.find_last_of('\\') + 1);
+	const std::string intermediate_path = filepath + obj + "_interm.obj";
+	 std::string tri_quad_intermediate_path = filepath + obj + "_tri_quad_interm.obj";
+
 	
 	VOXEL_GRID& e_grid = _params._closingResult;
 
@@ -988,15 +1069,42 @@ void GenerateCageFromMeshOperation::Execute() {
 	std::array<ExactVector, 3> voxel_strides = { ExactVector(base_cellsize, 0, 0),
 	ExactVector(0, base_cellsize, 0), ExactVector(0, 0, base_cellsize) };
 	ExactMesh extracted_surface = extract_surface_from_voxels(e_grid, voxel_strides, global_min_point);
-	CGAL::write_off(intermediate_path.c_str(), extracted_surface); std::cout << "extraction done\n";
+	CGAL::write_off(intermediate_path.c_str(), extracted_surface); 
+	std::cout << "extraction done\n";
 
 	// Simplification
 	MyMesh final_mesh;
 	tri::io::ImporterOFF<MyMesh>::Open(final_mesh, intermediate_path.c_str());
 	decimation(final_mesh, _params._smoothIterations, _params._targetNumFaces);
-	std::string output_path = filepath + "result\\" + obj + "_cage" + std::to_string(BASE_RESOLUTION) + "new.obj";
 
-	tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, outputfilename.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
+    if(!isTriQuad){
+			tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, outputfilename.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
+
+	}
+	else{
+		tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,tri_quad_intermediate_path.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
+         
+		   SurMesh input_mesh;
+		
+    if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(tri_quad_intermediate_path, input_mesh) || input_mesh.is_empty())
+    {
+        std::cerr << "Invalid input file.\n";
+        return ;
+    }
+
+	convert_to_tri_quad_meshT(input_mesh);
+        std::ofstream out(outputfilename);
+    if (!out) {
+        std::cerr << "Error: Cannot open output.obj for writing!" << std::endl;
+        return ;
+    }
+
+    if (!CGAL::IO::write_OBJ(out, input_mesh)) {
+        std::cerr << "Error: Failed to write OBJ file!" << std::endl;
+        return ;
+    }
+	}
+
 
 	//int cage_end = clock();
 	//printf("[Cage Generation] elapsed time: %5.3f sec\n", float(cage_end - cage_start) / CLOCKS_PER_SEC);

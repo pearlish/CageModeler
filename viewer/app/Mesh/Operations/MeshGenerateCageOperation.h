@@ -108,14 +108,16 @@ struct GenerateCageFromMeshOperationParams {
 		const int scale,
 		const int smoothIterations,
 		const int targetNumFaces,
-		VOXEL_GRID& closingResult
+		VOXEL_GRID& closingResult,
+		bool isTriQuad
 	) :
 		_meshfilepath(std::move(meshFilepath)),
 		_cagefilepath(std::move(cageFilepath)),
 		_scale(scale),
 		_smoothIterations(smoothIterations),
 		_targetNumFaces(targetNumFaces),
-		_closingResult(closingResult)
+		_closingResult(closingResult),
+		_isTriQuad(isTriQuad)
 	{}
 
 	std::filesystem::path _meshfilepath;
@@ -124,6 +126,7 @@ struct GenerateCageFromMeshOperationParams {
 	int _smoothIterations;
 	int _targetNumFaces;
 	VOXEL_GRID& _closingResult;
+	bool _isTriQuad;
 
 };
 
@@ -163,7 +166,7 @@ private:
 	GLuint _voxFboTex;
 	GLuint _voxTex;
 
-	int _resolution = 32;
+	unsigned int _resolution = 32;
 	float _seSize = _resolution / 16;
 	float _cellSize = 0.f;
 
